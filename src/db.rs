@@ -48,6 +48,10 @@ pub fn open(path: &str) -> Result<Db> {
             created_at TEXT NOT NULL,
             initiative_id INTEGER REFERENCES initiatives(id)
         );
+        CREATE TABLE IF NOT EXISTS sync_cursors (
+            source TEXT PRIMARY KEY,
+            last_synced_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS linear_tickets (
             identifier TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -62,14 +66,68 @@ pub fn open(path: &str) -> Result<Db> {
     Ok(Arc::new(Mutex::new(conn)))
 }
 
-pub fn is_empty(db: &Db) -> Result<bool> {
+// Epoch default means a never-polled source is treated as "everything is
+// new" — a fresh DB naturally does a full backfill on its first poll.
+const EPOCH: &str = "0000-01-01T00:00:00Z";
+
+pub fn get_cursor(db: &Db, source: &str) -> Result<String> {
     let conn = db.lock().unwrap();
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM github_links", [], |r| r.get(0))?;
-    Ok(count == 0)
+    Ok(conn
+        .query_row(
+            "SELECT last_synced_at FROM sync_cursors WHERE source = ?1",
+            params![source],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| EPOCH.to_string()))
+}
+
+pub fn set_cursor(db: &Db, source: &str, at: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO sync_cursors (source, last_synced_at) VALUES (?1, ?2)
+         ON CONFLICT(source) DO UPDATE SET last_synced_at = excluded.last_synced_at",
+        params![source, at],
+    )?;
+    Ok(())
 }
 
 // --- tool-call layer: these are the write primitives an extraction pass
 // (rule-based here, Claude tool-use in the live system) invokes per event ---
+
+// authored > reviewing > mentioned: a later, weaker mention of a PR already
+// tracked as jonathan's own shouldn't demote it. Merge only ever upgrades.
+fn relationship_rank(r: &str) -> u8 {
+    match r {
+        "authored" => 3,
+        "reviewing" => 2,
+        _ => 1,
+    }
+}
+
+fn merge_relationship(old: &str, new: &str) -> String {
+    if relationship_rank(new) > relationship_rank(old) {
+        new.to_string()
+    } else {
+        old.to_string()
+    }
+}
+
+const MAX_CONTEXT_ENTRIES: usize = 3;
+
+// Accumulates distinct context notes instead of replacing the one we had —
+// each re-mention adds information rather than erasing the last mention's.
+fn merge_context(old: &str, new: &str) -> String {
+    if old.is_empty() || old == new {
+        return new.to_string();
+    }
+    let mut entries: Vec<&str> = old.split(" | ").collect();
+    if entries.last() == Some(&new) {
+        return old.to_string();
+    }
+    entries.push(new);
+    let start = entries.len().saturating_sub(MAX_CONTEXT_ENTRIES);
+    entries[start..].join(" | ")
+}
 
 pub fn log_github_link(
     db: &Db,
@@ -82,22 +140,39 @@ pub fn log_github_link(
     now: &str,
 ) -> Result<i64> {
     let conn = db.lock().unwrap();
-    conn.execute(
-        "INSERT INTO github_links (url, repo, relationship, status, context, source_permalink, first_seen, last_synced)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-         ON CONFLICT(url) DO UPDATE SET
-            relationship = excluded.relationship,
-            status = excluded.status,
-            context = excluded.context,
-            last_synced = excluded.last_synced",
-        params![url, repo, relationship, status, context, source_permalink, now],
-    )?;
-    conn.query_row(
-        "SELECT id FROM github_links WHERE url = ?1",
-        params![url],
-        |r| r.get(0),
-    )
-    .map_err(Into::into)
+
+    let existing: Option<(i64, String, String)> = conn
+        .query_row(
+            "SELECT id, relationship, context FROM github_links WHERE url = ?1",
+            params![url],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+
+    match existing {
+        // Deliberately does not touch `status` here: that's owned by
+        // sync_github_status (the live state check) and the manual Resolve
+        // action, not by extraction re-mentioning a PR it already knows
+        // about. Also leaves `first_seen`/`source_permalink` pinned to
+        // whichever message first reported this PR.
+        Some((id, old_relationship, old_context)) => {
+            let merged_relationship = merge_relationship(&old_relationship, relationship);
+            let merged_context = merge_context(&old_context, context);
+            conn.execute(
+                "UPDATE github_links SET relationship = ?1, context = ?2, last_synced = ?3 WHERE id = ?4",
+                params![merged_relationship, merged_context, now, id],
+            )?;
+            Ok(id)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO github_links (url, repo, relationship, status, context, source_permalink, first_seen, last_synced)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![url, repo, relationship, status, context, source_permalink, now],
+            )?;
+            Ok(conn.last_insert_rowid())
+        }
+    }
 }
 
 pub fn log_commitment(
@@ -393,8 +468,9 @@ pub fn create_initiative(db: &Db, name: &str, description: &str, now: &str) -> R
 }
 
 // Idempotent: returns the existing initiative's id if `name` is already
-// taken. Used by the heuristic classifier so re-running it is a no-op.
-pub fn get_or_create_initiative(db: &Db, name: &str, now: &str) -> Result<i64> {
+// taken (its description is left untouched). Used by both the heuristic and
+// agent-based classifiers so re-running either is a no-op per item.
+pub fn get_or_create_initiative(db: &Db, name: &str, description: &str, now: &str) -> Result<i64> {
     {
         let conn = db.lock().unwrap();
         let existing: Option<i64> = conn
@@ -408,7 +484,7 @@ pub fn get_or_create_initiative(db: &Db, name: &str, now: &str) -> Result<i64> {
             return Ok(id);
         }
     }
-    create_initiative(db, name, "", now)
+    create_initiative(db, name, description, now)
 }
 
 pub fn delete_initiative(db: &Db, id: i64) -> Result<()> {

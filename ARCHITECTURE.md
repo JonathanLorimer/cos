@@ -129,31 +129,105 @@ The cross-cutting grouping a PR, a Slack ask, and a Linear ticket can all
 belong to ("the ledger dedupe fix"), so you can look at one thing instead of
 four lists.
 
+Classification is deliberately a separate, later stage from extraction — see
+Polling below for why.
+
 ```mermaid
 flowchart LR
-    Items["unassigned items\n(initiative_id IS NULL)"] --> Classify["classify::run\n(heuristic today, Claude later)"]
-    Classify -->|assign_github_link / assign_commitment /\nassign_mention / assign_linear_ticket| DB[(SQLite)]
+    Msg["new Slack message\n(since cursor)"] --> AE["agent_extraction::run_messages\n(Sonnet 5, per message)"]
+    AE -->|log_github_link / log_commitment / flag_mention\nNO initiative assigned| DB[(SQLite)]
+    DB --> Unassigned["every unassigned item,\nall 4 tables, gathered at once"]
+    Unassigned --> ABC["agent_bulk_classify::run\n(Opus 5, ONE call for the whole batch)"]
+    ABC -->|assign_initiative_item x N\nin a single response| DB
     DB --> List["GET /initiatives\n(cards: name, open/total)"]
     DB --> Detail["GET /initiatives/:id\n(all 4 item types, filtered)"]
 ```
 
-`classify::run` is the seam for real agent-based classification: it only
-ever touches items with `initiative_id IS NULL`, so it's safe to re-run (via
-the "Run classification" button, or after every poll cycle later) without
-clobbering manual assignments. Today it's a heuristic — group everything
-touching the same GitHub repo into one initiative — because real
-classification (grouping by *intent*, not just shared repo — e.g. folding in
-a Slack thread that never mentions the repo by name) needs an LLM call, and
-there's no `ANTHROPIC_API_KEY` configured yet (see Environment variables,
-below). Swapping the heuristic for a live Claude tool-use pass only touches
-`src/classify.rs` — same `db::assign_*` write primitives either way.
+Two parallel implementations, chosen at runtime by whether `ANTHROPIC_API_KEY`
+is set (`agent::AnthropicClient::is_configured`):
+
+- **No key**: `extraction.rs` (regex/keyword rules) + `classify.rs` (group by
+  shared GitHub repo, one item at a time). Deterministic, free, no network
+  call — what runs by default and in CI.
+- **Key present**: `agent_extraction.rs` (triage) + `agent_bulk_classify.rs`
+  (initiative assignment), real `POST /v1/messages` tool-use calls (raw HTTP
+  via `reqwest`; there's no official Anthropic Rust SDK) — but at two
+  different model tiers for two different jobs:
+  - `agent_extraction`: **Sonnet 5**, `effort: "low"`, one call per Slack
+    message. Decides PR relationship (authored / reviewing / mentioned),
+    whether it's a commitment, whether it needs a response. Does **not**
+    decide initiative — that's deferred entirely to the bulk pass.
+  - `agent_bulk_classify`: **Opus 5**, `effort: "high"`, one call for the
+    *entire* batch of currently-unassigned items across all four tables.
+    Every item is listed in a single prompt; Opus responds with one
+    `assign_initiative_item` tool call per item in the same turn. Seeing
+    everything at once is the point: it can consolidate items that only make
+    sense together (e.g. an infra PR, two unrelated-looking Slack mentions,
+    and a Linear ticket all turned out to be the same "Release Cut
+    Readiness" effort) in a way a one-item-at-a-time pass structurally
+    can't — a prior per-item-Sonnet version of this classifier split that
+    same set into two initiatives; the bulk Opus pass merged them correctly.
+    Skipped entirely (no API call) when nothing is unassigned.
+
+Both paths write through the same `db::log_*` / `db::assign_*` primitives, so
+the UI and schema don't know or care which one ran.
+
+## Polling
+
+Two independent `tokio::spawn` loops, different cadences, matching the
+cost/frequency split above:
+
+```mermaid
+sequenceDiagram
+    participant Fast as extraction loop (COS_POLL_INTERVAL_SECS, default 300s)
+    participant Slow as bulk classification loop (COS_BULK_INTERVAL_SECS, default 1800s)
+    participant DB as SQLite (sync_cursors + initiative_id)
+    participant Src as mock sources
+
+    Fast->>DB: get_cursor("slack"), get_cursor("linear")
+    Fast->>Src: fetch all, filter to ts/updated_at > cursor
+    Fast->>DB: write new items (no initiative_id), advance cursors
+    Slow->>DB: gather every item with initiative_id IS NULL, all 4 tables
+    Slow->>DB: one bulk call -> assign_initiative_item per item
+```
+
+`poller::run_extraction` and `poller::run_bulk_classification` are each a
+single code path reused by three triggers: the startup calls in `main.rs`
+(run once immediately, so the UI isn't empty on first boot), their own
+interval loop, and — for classification only — the "Run classification"
+button (a manual, on-demand bulk pass).
+
+Each source (`slack`, `linear`) has a row in `sync_cursors` holding
+`last_synced_at`. A missing row defaults to the epoch, so a brand-new
+database's first extraction cycle is a full backfill — "seed" isn't a
+separate code path, it's just what the cursor default produces. Every cycle
+advances both cursors to the cycle's own timestamp (not the max item
+timestamp), and only items newer than the cursor get extracted — this is
+what makes the interval loop safe to run against unique-free tables like
+`commitments`: without it, every tick would re-insert every historical
+commitment again. GitHub status sync isn't cursor-gated — it's "what's the
+current state of tracked links," not an event feed, so it always runs in
+full each extraction cycle.
+
+Timestamps are UTC with a `Z` suffix everywhere (`util::now()`), matching the
+mock fixtures' format, so cursor comparisons are plain string comparison —
+no parsing, and no local-timezone-offset bugs from mixing `Local::now()`
+output with `Z`-suffixed fixture data (an earlier version of this code had
+exactly that bug before the cursor comparisons existed to expose it).
+
+What's still mock: the sources themselves (`mock::slack_messages()` etc. are
+static fixtures, not live API calls) — the polling *mechanism* (cursor,
+interval loop, extraction/classification dispatch) is real and will work
+unchanged once `src/mock.rs`'s fetch functions are swapped for live
+Slack/Linear API calls.
 
 ## Environment variables
 
-None of these are read today — the app runs entirely on mock fixtures and a
-local SQLite file. They're documented now so the NixOS module's
-`environmentFile` (sops-nix) option has a known target once each poller /
-the classifier goes live:
+`ANTHROPIC_API_KEY` is live — set it and extraction/classification run
+through real Claude tool-use calls instead of the rule-based fallback. The
+other three aren't read yet; the app still runs entirely on mock Slack/Linear
+/GitHub fixtures. Documented now so the NixOS module's `environmentFile`
+(sops-nix) option has a known target once each poller goes live:
 
 | Variable | Used by |
 |---|---|
@@ -169,13 +243,34 @@ whichever apply to a given message/event, or none:
 
 | Tool | Purpose |
 |---|---|
-| `log_github_link(url, relationship, context, source_permalink)` | upsert by `url` |
+| `log_github_link(url, relationship, context, source_permalink)` | merge by `url` — see below |
 | `log_commitment(text, due_date, source_permalink)` | insert |
 | `log_mention(source_permalink, from_user, text, needs_response)` | upsert by `source_permalink` |
 | `log_linear_ticket(identifier, relationship, linked_github_url)` | upsert by `identifier` |
 | `resolve(table, id)` | mark done / responded / merged |
 
-Each tool is a thin Rust fn: validate args, `INSERT ... ON CONFLICT DO UPDATE`.
+Most of these are a thin Rust fn doing `INSERT ... ON CONFLICT DO UPDATE SET
+excluded.*` — a second mention of the same thing just overwrites with
+whatever the latest call said. `log_github_link` is the one exception,
+because blind overwrite was actively wrong there: the LLM classifies each
+message in isolation with no memory of what's already tracked, so a PR
+jonathan opened (`authored`) could get silently reclassified to `mentioned`
+by someone else later casually referencing it, and a `merged` PR could get
+reset to `open` because extraction always passes `"open"` as its default
+status. So `log_github_link` does an explicit read-then-merge instead of a
+raw upsert:
+
+- `relationship` only ever upgrades (`authored` > `reviewing` > `mentioned`
+  by rank) — a weaker new signal can't demote a stronger existing one.
+- `status` isn't touched by this path at all — it's owned by
+  `sync_github_status` (live state) and the manual Resolve action.
+- `context` accumulates distinct notes (capped at the last 3, `" | "`
+  joined) instead of replacing the previous one.
+- `first_seen` / `source_permalink` stay pinned to whichever message first
+  reported the PR.
+
+This lives in `db::log_github_link` itself, so both the heuristic and
+agent-based extraction paths get it for free — same guarantee either way.
 
 ## Web app
 

@@ -1,12 +1,12 @@
 use anyhow::Result;
 
 use crate::db::{self, Db};
-use crate::mock;
+use crate::mock::{LinearNotificationFixture, SlackMessageFixture};
 use crate::util::{find_github_url, repo_from_url};
 
 // Rule-based stand-in for the Claude tool-use extraction pass described in
 // ARCHITECTURE.md. Same db:: write primitives either way — swapping this for
-// a live Claude call only touches this file.
+// a live Claude call only touches this file (see agent_extraction.rs).
 
 fn due_date_from_text(text: &str) -> String {
     match text.find("by ") {
@@ -21,8 +21,8 @@ fn due_date_from_text(text: &str) -> String {
 
 const ME: &str = "jonathan";
 
-pub fn run(db: &Db, now: &str) -> Result<()> {
-    for msg in mock::slack_messages() {
+pub fn run_messages(db: &Db, messages: &[SlackMessageFixture], now: &str) -> Result<()> {
+    for msg in messages {
         if let Some(url) = find_github_url(&msg.text) {
             let repo = repo_from_url(&url);
             let relationship = if msg.from_user == ME {
@@ -53,8 +53,14 @@ pub fn run(db: &Db, now: &str) -> Result<()> {
             db::log_mention(db, &msg.permalink, &msg.from_user, &msg.text, true, now)?;
         }
     }
+    Ok(())
+}
 
-    for n in mock::linear_notifications() {
+// Mechanical — Linear's own notification type already tells us the
+// relationship, no classification needed. Shared by both the heuristic and
+// agent-based extraction paths.
+pub fn insert_linear_tickets(db: &Db, tickets: &[LinearNotificationFixture], now: &str) -> Result<()> {
+    for n in tickets {
         db::log_linear_ticket(
             db,
             &n.identifier,
@@ -65,10 +71,5 @@ pub fn run(db: &Db, now: &str) -> Result<()> {
             now,
         )?;
     }
-
-    for s in mock::github_statuses() {
-        db::sync_github_status(db, &s.url, &s.status, now)?;
-    }
-
     Ok(())
 }

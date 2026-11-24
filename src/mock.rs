@@ -100,6 +100,21 @@ pub fn slack_messages() -> Vec<SlackMessageFixture> {
             reacted_by_me: false,
             ts: "2026-11-23T10:05:00Z".into(),
         },
+        // Re-mentions an already-tracked PR (gateway/301, authored by
+        // jonathan) with a weaker passing reference from someone else. Exists
+        // to exercise db::log_github_link's merge logic: relationship should
+        // stay 'authored' (not downgrade to 'mentioned'), status should stay
+        // whatever sync_github_status last set (not reset to 'open'), and
+        // context should accumulate this note rather than erase the original.
+        SlackMessageFixture {
+            permalink: "https://mercury.slack.com/archives/C04/p1008".into(),
+            channel: "#api-gateway".into(),
+            from_user: "priya".into(),
+            text: "nice work on https://github.com/mercury-eng/gateway/pull/301, rate limit bump looks solid".into(),
+            mentions_me: false,
+            reacted_by_me: false,
+            ts: "2026-11-23T16:00:00Z".into(),
+        },
     ]
 }
 

@@ -22,7 +22,7 @@ pub fn run(db: &Db, now: &str) -> Result<()> {
             Some(id) => *id,
             None => {
                 let name = repo_display_name(&link.repo);
-                let id = db::get_or_create_initiative(db, &name, now)?;
+                let id = db::get_or_create_initiative(db, &name, "", now)?;
                 repo_to_initiative.insert(link.repo.clone(), id);
                 id
             }

@@ -1,8 +1,12 @@
+mod agent;
+mod agent_bulk_classify;
+mod agent_extraction;
 mod classify;
 mod db;
 mod extraction;
 mod mock;
 mod models;
+mod poller;
 mod routes;
 mod util;
 
@@ -31,12 +35,32 @@ async fn main() -> anyhow::Result<()> {
     let db_path = std::env::var("COS_DB_PATH").unwrap_or_else(|_| "cos.sqlite3".into());
     let db = db::open(&db_path)?;
 
-    if db::is_empty(&db)? {
-        let now = chrono::Local::now().to_rfc3339();
-        extraction::run(&db, &now)?;
-        classify::run(&db, &now)?;
-        tracing::info!("seeded database from mock Slack/Linear/GitHub sources and classified into initiatives");
-    }
+    tracing::info!(
+        agent = agent::AnthropicClient::is_configured(),
+        "running startup extraction + bulk classification"
+    );
+    poller::run_extraction(&db).await?;
+    poller::run_bulk_classification(&db).await?;
+
+    let extraction_interval_secs: u64 = std::env::var("COS_POLL_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
+    let bulk_interval_secs: u64 = std::env::var("COS_BULK_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800);
+    poller::spawn_extraction_loop(
+        db.clone(),
+        std::time::Duration::from_secs(extraction_interval_secs),
+    );
+    poller::spawn_bulk_classification_loop(
+        db.clone(),
+        std::time::Duration::from_secs(bulk_interval_secs),
+    );
+    tracing::info!(
+        "extracting every {extraction_interval_secs}s, bulk-classifying every {bulk_interval_secs}s"
+    );
 
     let templates_dir = std::env::var("COS_TEMPLATES_DIR").unwrap_or_else(|_| "templates".into());
     let static_dir = std::env::var("COS_STATIC_DIR").unwrap_or_else(|_| "static".into());

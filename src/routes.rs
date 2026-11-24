@@ -6,16 +6,13 @@ use axum::{Form, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{SharedState, classify, db, mock};
+use crate::util::now;
+use crate::{SharedState, db, mock, poller};
 
 fn render<S: Serialize>(state: &SharedState, name: &str, ctx: S) -> Html<String> {
     let tmpl = state.env.get_template(name).expect("template exists");
     let value = minijinja::Value::from(minijinja::value::Serde(ctx));
     Html(tmpl.render(value).expect("template renders"))
-}
-
-fn now() -> String {
-    chrono::Local::now().to_rfc3339()
 }
 
 #[derive(Serialize)]
@@ -418,7 +415,7 @@ async fn create_initiative(
 }
 
 async fn classify_now(State(state): State<SharedState>) -> Html<String> {
-    classify::run(&state.db, &now()).unwrap();
+    poller::run_bulk_classification(&state.db).await.unwrap();
     let (initiatives, unclassified) = initiative_summaries(&state);
     render(
         &state,

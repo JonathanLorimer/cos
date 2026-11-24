@@ -1,3 +1,10 @@
+// RFC3339 UTC, 'Z' suffix, second precision — matches the mock fixtures'
+// timestamp format exactly, so cursor comparisons can stay plain string
+// comparison instead of parsing.
+pub fn now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 pub fn find_github_url(text: &str) -> Option<String> {
     let idx = text.find("https://github.com/")?;
     let rest = &text[idx..];

@@ -4,3 +4,6 @@
 /.claude/settings.local.json
 /result
 /result-*
+/.direnv
+/screenshots
+.envrc
