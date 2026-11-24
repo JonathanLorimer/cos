@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en" class="h-full bg-slate-50">
+<head>
+  <meta charset="utf-8" />
+  <title>{% block title %}Dashboard{% endblock %} · cos</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/tailwind.css" />
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body class="h-full text-slate-800">
+  <div class="max-w-5xl mx-auto px-6 py-8">
+    <header class="flex items-center justify-between mb-8 flex-wrap gap-3">
+      <h1 class="text-xl font-semibold">cos <span class="text-slate-400 font-normal">· chief of staff</span></h1>
+      <nav class="flex gap-4 text-sm">
+        <a href="/" class="hover:text-slate-950 {% if active == 'dashboard' %}font-semibold text-slate-950{% else %}text-slate-500{% endif %}">Dashboard</a>
+        <a href="/github-links" class="hover:text-slate-950 {% if active == 'github-links' %}font-semibold text-slate-950{% else %}text-slate-500{% endif %}">GitHub Links</a>
+        <a href="/commitments" class="hover:text-slate-950 {% if active == 'commitments' %}font-semibold text-slate-950{% else %}text-slate-500{% endif %}">Commitments</a>
+        <a href="/mentions" class="hover:text-slate-950 {% if active == 'mentions' %}font-semibold text-slate-950{% else %}text-slate-500{% endif %}">Mentions</a>
+        <a href="/linear-tickets" class="hover:text-slate-950 {% if active == 'linear-tickets' %}font-semibold text-slate-950{% else %}text-slate-500{% endif %}">Linear</a>
+        <a href="/sources" class="hover:text-slate-950 {% if active == 'sources' %}font-semibold text-slate-950{% else %}text-slate-500{% endif %}">Sources (mock)</a>
+      </nav>
+    </header>
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

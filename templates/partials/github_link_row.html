@@ -1,0 +1,22 @@
+<tr id="gh-row-{{ item.id }}" class="border-b border-slate-100 last:border-0"
+    data-search="{{ item.url }} {{ item.repo }} {{ item.relationship }} {{ item.status }} {{ item.context }}">
+  <td class="py-2 px-3 text-sm align-top">
+    <a href="{{ item.url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline font-medium">{{ item.repo }}</a>
+    <div class="text-xs text-slate-400 truncate max-w-md">{{ item.context }}</div>
+  </td>
+  <td class="py-2 px-3 text-sm align-top">{{ item.relationship }}</td>
+  <td class="py-2 px-3 text-sm align-top">
+    <span class="inline-block rounded px-2 py-0.5 text-xs
+      {% if item.status == 'merged' %}bg-green-100 text-green-700
+      {% elif item.status == 'changes_requested' %}bg-amber-100 text-amber-700
+      {% elif item.status == 'resolved' %}bg-slate-100 text-slate-500
+      {% else %}bg-blue-100 text-blue-700{% endif %}">{{ item.status }}</span>
+  </td>
+  <td class="py-2 px-3 text-sm align-top text-slate-400">{{ item.last_synced | short_date }}</td>
+  <td class="py-2 px-3 text-sm align-top text-right whitespace-nowrap">
+    <button class="text-xs text-slate-500 hover:text-slate-900 mr-3"
+      hx-patch="/github-links/{{ item.id }}/resolve" hx-target="#gh-row-{{ item.id }}" hx-swap="outerHTML">Resolve</button>
+    <button class="text-xs text-red-500 hover:text-red-700"
+      hx-delete="/github-links/{{ item.id }}" hx-target="#gh-row-{{ item.id }}" hx-swap="outerHTML" hx-confirm="Delete this link?">Delete</button>
+  </td>
+</tr>

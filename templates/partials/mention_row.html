@@ -1,0 +1,21 @@
+<tr id="mn-row-{{ item.id }}" class="border-b border-slate-100 last:border-0"
+    data-search="{{ item.from_user }} {{ item.text }}">
+  <td class="py-2 px-3 text-sm align-top font-medium">{{ item.from_user }}</td>
+  <td class="py-2 px-3 text-sm align-top">{{ item.text }}</td>
+  <td class="py-2 px-3 text-sm align-top text-slate-400">{{ item.created_at | short_date }}</td>
+  <td class="py-2 px-3 text-sm align-top">
+    {% if item.responded %}
+    <span class="inline-block rounded px-2 py-0.5 text-xs bg-green-100 text-green-700">responded</span>
+    {% elif item.needs_response %}
+    <span class="inline-block rounded px-2 py-0.5 text-xs bg-amber-100 text-amber-700">needs response</span>
+    {% else %}
+    <span class="inline-block rounded px-2 py-0.5 text-xs bg-slate-100 text-slate-500">fyi</span>
+    {% endif %}
+  </td>
+  <td class="py-2 px-3 text-sm align-top text-right whitespace-nowrap">
+    <button class="text-xs text-slate-500 hover:text-slate-900 mr-3"
+      hx-patch="/mentions/{{ item.id }}/resolve" hx-target="#mn-row-{{ item.id }}" hx-swap="outerHTML">Mark responded</button>
+    <button class="text-xs text-red-500 hover:text-red-700"
+      hx-delete="/mentions/{{ item.id }}" hx-target="#mn-row-{{ item.id }}" hx-swap="outerHTML" hx-confirm="Delete this mention?">Delete</button>
+  </td>
+</tr>

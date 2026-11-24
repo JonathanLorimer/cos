@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Sources{% endblock %}
+{% block content %}
+<h2 class="text-lg font-semibold mb-2">Mock Sources</h2>
+<p class="text-sm text-slate-500 mb-4">
+  Stand-ins for the Slack, Linear, and GitHub APIs described in
+  <code class="text-xs bg-slate-100 px-1 py-0.5 rounded">ARCHITECTURE.md</code>.
+  The seed job on startup reads these same fixtures through
+  <code class="text-xs bg-slate-100 px-1 py-0.5 rounded">extraction::run</code>
+  and writes the rows you see on the other pages. Swapping a mock for a live
+  API only touches that one module.
+</p>
+<div class="grid gap-4">
+  <a href="/mock/slack" target="_blank" class="block rounded-lg border border-slate-200 bg-white p-4 hover:border-slate-400">
+    <div class="font-medium text-sm">GET /mock/slack</div>
+    <div class="text-xs text-slate-500">search.messages / reactions.list fixture</div>
+  </a>
+  <a href="/mock/linear" target="_blank" class="block rounded-lg border border-slate-200 bg-white p-4 hover:border-slate-400">
+    <div class="font-medium text-sm">GET /mock/linear</div>
+    <div class="text-xs text-slate-500">viewer.notifications fixture</div>
+  </a>
+  <a href="/mock/github" target="_blank" class="block rounded-lg border border-slate-200 bg-white p-4 hover:border-slate-400">
+    <div class="font-medium text-sm">GET /mock/github</div>
+    <div class="text-xs text-slate-500">PR status-sync fixture</div>
+  </a>
+</div>
+{% endblock %}
