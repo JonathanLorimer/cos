@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Initiatives{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h2 class="text-lg font-semibold">Initiatives</h2>
+  <button class="text-sm bg-slate-900 text-white rounded px-3 py-1.5"
+    hx-post="/initiatives/classify" hx-target="#initiative-cards" hx-swap="outerHTML">Run classification</button>
+</div>
+
+<details class="mb-4 rounded-lg border border-slate-200 bg-white">
+  <summary class="cursor-pointer px-4 py-2 text-sm font-medium text-slate-600">Create manually</summary>
+  <form class="px-4 pb-4 grid grid-cols-2 gap-3"
+        hx-post="/initiatives" hx-target="#initiative-cards" hx-swap="outerHTML">
+    <input name="name" placeholder="Initiative name" required class="border border-slate-300 rounded px-2 py-1 text-sm" />
+    <input name="description" placeholder="Description (optional)" class="border border-slate-300 rounded px-2 py-1 text-sm" />
+    <button class="col-span-2 bg-slate-900 text-white text-sm rounded px-3 py-1.5 w-fit">Add</button>
+  </form>
+</details>
+
+{% include "partials/initiative_cards.html" %}
+{% endblock %}

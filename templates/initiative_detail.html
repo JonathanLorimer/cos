@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ initiative.name }}{% endblock %}
+{% block content %}
+<a href="/initiatives" class="text-sm text-slate-500 hover:text-slate-900">&larr; Initiatives</a>
+<h2 class="text-lg font-semibold mt-2 mb-1">{{ initiative.name }}</h2>
+{% if initiative.description %}<p class="text-sm text-slate-500 mb-6">{{ initiative.description }}</p>{% else %}<div class="mb-6"></div>{% endif %}
+
+<section class="mb-8">
+  <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-2">GitHub Links</h3>
+  <div class="rounded-lg border border-slate-200 bg-white overflow-hidden">
+    <table id="github-links-table" class="w-full">
+      <tbody>
+        {% for item in github_links %}{% include "partials/github_link_row.html" %}{% else %}
+        <tr><td class="py-4 px-3 text-sm text-slate-400 text-center">None</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="mb-8">
+  <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-2">Commitments</h3>
+  <div class="rounded-lg border border-slate-200 bg-white overflow-hidden">
+    <table id="commitments-table" class="w-full">
+      <tbody>
+        {% for item in commitments %}{% include "partials/commitment_row.html" %}{% else %}
+        <tr><td class="py-4 px-3 text-sm text-slate-400 text-center">None</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="mb-8">
+  <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-2">Mentions</h3>
+  <div class="rounded-lg border border-slate-200 bg-white overflow-hidden">
+    <table id="mentions-table" class="w-full">
+      <tbody>
+        {% for item in mentions %}{% include "partials/mention_row.html" %}{% else %}
+        <tr><td class="py-4 px-3 text-sm text-slate-400 text-center">None</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-2">Linear Tickets</h3>
+  <div class="rounded-lg border border-slate-200 bg-white overflow-hidden">
+    <table id="linear-tickets-table" class="w-full">
+      <tbody>
+        {% for item in linear_tickets %}{% include "partials/linear_ticket_row.html" %}{% else %}
+        <tr><td class="py-4 px-3 text-sm text-slate-400 text-center">None</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

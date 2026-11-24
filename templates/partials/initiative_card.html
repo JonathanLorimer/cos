@@ -1,0 +1,10 @@
+<div id="init-card-{{ item.id }}" class="rounded-lg border border-slate-200 bg-white p-4 hover:border-slate-400">
+  <div class="flex justify-between items-start gap-2">
+    <a href="/initiatives/{{ item.id }}" class="font-medium hover:underline">{{ item.name }}</a>
+    <button class="text-xs text-red-500 hover:text-red-700 shrink-0"
+      hx-delete="/initiatives/{{ item.id }}" hx-target="#init-card-{{ item.id }}" hx-swap="outerHTML"
+      hx-confirm="Delete this initiative? Its items become unclassified.">Delete</button>
+  </div>
+  {% if item.description %}<div class="text-xs text-slate-500 mt-1">{{ item.description }}</div>{% endif %}
+  <div class="mt-3 text-xs text-slate-500">{{ item.open_items }} open &middot; {{ item.total_items }} total</div>
+</div>

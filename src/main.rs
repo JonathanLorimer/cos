@@ -1,8 +1,10 @@
+mod classify;
 mod db;
 mod extraction;
 mod mock;
 mod models;
 mod routes;
+mod util;
 
 use std::sync::Arc;
 
@@ -32,7 +34,8 @@ async fn main() -> anyhow::Result<()> {
     if db::is_empty(&db)? {
         let now = chrono::Local::now().to_rfc3339();
         extraction::run(&db, &now)?;
-        tracing::info!("seeded database from mock Slack/Linear/GitHub sources");
+        classify::run(&db, &now)?;
+        tracing::info!("seeded database from mock Slack/Linear/GitHub sources and classified into initiatives");
     }
 
     let templates_dir = std::env::var("COS_TEMPLATES_DIR").unwrap_or_else(|_| "templates".into());
@@ -41,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
     let mut env = Environment::new();
     env.set_loader(minijinja::path_loader(&templates_dir));
     env.add_filter("short_date", |s: String| -> String { s.chars().take(10).collect() });
+    env.add_filter("is_link", |s: String| -> bool { s.starts_with("https://") });
 
     let state: SharedState = Arc::new(AppState { db, env });
 

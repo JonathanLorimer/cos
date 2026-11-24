@@ -104,8 +104,63 @@ erDiagram
         text linked_github_url
         text last_synced
     }
+    INITIATIVES {
+        integer id PK
+        text name
+        text description
+        text created_at
+    }
     GITHUB_LINKS ||--o| LINEAR_TICKETS : "linked_github_url"
+    INITIATIVES ||--o{ GITHUB_LINKS : "initiative_id"
+    INITIATIVES ||--o{ COMMITMENTS : "initiative_id"
+    INITIATIVES ||--o{ MENTIONS : "initiative_id"
+    INITIATIVES ||--o{ LINEAR_TICKETS : "initiative_id"
 ```
+
+Every item table (`github_links`, `commitments`, `mentions`, `linear_tickets`)
+carries a nullable `initiative_id`. One initiative per item, not a
+many-to-many tag table — simplest thing that answers "what's open under this
+initiative," and cheap to widen into a join table later if an item ever
+genuinely needs to belong to more than one.
+
+## Initiatives
+
+The cross-cutting grouping a PR, a Slack ask, and a Linear ticket can all
+belong to ("the ledger dedupe fix"), so you can look at one thing instead of
+four lists.
+
+```mermaid
+flowchart LR
+    Items["unassigned items\n(initiative_id IS NULL)"] --> Classify["classify::run\n(heuristic today, Claude later)"]
+    Classify -->|assign_github_link / assign_commitment /\nassign_mention / assign_linear_ticket| DB[(SQLite)]
+    DB --> List["GET /initiatives\n(cards: name, open/total)"]
+    DB --> Detail["GET /initiatives/:id\n(all 4 item types, filtered)"]
+```
+
+`classify::run` is the seam for real agent-based classification: it only
+ever touches items with `initiative_id IS NULL`, so it's safe to re-run (via
+the "Run classification" button, or after every poll cycle later) without
+clobbering manual assignments. Today it's a heuristic — group everything
+touching the same GitHub repo into one initiative — because real
+classification (grouping by *intent*, not just shared repo — e.g. folding in
+a Slack thread that never mentions the repo by name) needs an LLM call, and
+there's no `ANTHROPIC_API_KEY` configured yet (see Environment variables,
+below). Swapping the heuristic for a live Claude tool-use pass only touches
+`src/classify.rs` — same `db::assign_*` write primitives either way.
+
+## Environment variables
+
+None of these are read today — the app runs entirely on mock fixtures and a
+local SQLite file. They're documented now so the NixOS module's
+`environmentFile` (sops-nix) option has a known target once each poller /
+the classifier goes live:
+
+| Variable | Used by |
+|---|---|
+| `SLACK_USER_TOKEN` | live Slack poller (`search.messages`, `reactions.list`) |
+| `LINEAR_API_KEY` | live Linear poller |
+| `GITHUB_TOKEN` | live GitHub status-sync job |
+| `ANTHROPIC_API_KEY` | real extraction + initiative classification (replaces `extraction.rs` / `classify.rs` heuristics) |
 
 ## Extraction tool calls
 

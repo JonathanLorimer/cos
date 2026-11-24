@@ -1,7 +1,12 @@
 <tr id="mn-row-{{ item.id }}" class="border-b border-slate-100 last:border-0"
     data-search="{{ item.from_user }} {{ item.text }}">
   <td class="py-2 px-3 text-sm align-top font-medium">{{ item.from_user }}</td>
-  <td class="py-2 px-3 text-sm align-top">{{ item.text }}</td>
+  <td class="py-2 px-3 text-sm align-top">
+    {{ item.text }}
+    {% if item.source_permalink | is_link %}
+    <div><a href="{{ item.source_permalink }}" target="_blank" rel="noopener" class="text-xs text-slate-400 hover:text-blue-600 hover:underline">View in Slack &#8599;</a></div>
+    {% endif %}
+  </td>
   <td class="py-2 px-3 text-sm align-top text-slate-400">{{ item.created_at | short_date }}</td>
   <td class="py-2 px-3 text-sm align-top">
     {% if item.responded %}

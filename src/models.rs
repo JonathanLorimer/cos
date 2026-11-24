@@ -11,6 +11,7 @@ pub struct GithubLink {
     pub source_permalink: String,
     pub first_seen: String,
     pub last_synced: String,
+    pub initiative_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -21,6 +22,7 @@ pub struct Commitment {
     pub status: String,
     pub source_permalink: String,
     pub created_at: String,
+    pub initiative_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -32,6 +34,7 @@ pub struct Mention {
     pub needs_response: bool,
     pub responded: bool,
     pub created_at: String,
+    pub initiative_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,4 +45,13 @@ pub struct LinearTicket {
     pub relationship: String,
     pub linked_github_url: Option<String>,
     pub last_synced: String,
+    pub initiative_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Initiative {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub created_at: String,
 }

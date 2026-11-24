@@ -2,25 +2,11 @@ use anyhow::Result;
 
 use crate::db::{self, Db};
 use crate::mock;
+use crate::util::{find_github_url, repo_from_url};
 
 // Rule-based stand-in for the Claude tool-use extraction pass described in
 // ARCHITECTURE.md. Same db:: write primitives either way — swapping this for
 // a live Claude call only touches this file.
-
-fn find_github_url(text: &str) -> Option<String> {
-    let idx = text.find("https://github.com/")?;
-    let rest = &text[idx..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    Some(rest[..end].trim_end_matches(['.', ',']).to_string())
-}
-
-fn repo_from_url(url: &str) -> String {
-    url.trim_start_matches("https://github.com/")
-        .splitn(3, '/')
-        .take(2)
-        .collect::<Vec<_>>()
-        .join("/")
-}
 
 fn due_date_from_text(text: &str) -> String {
     match text.find("by ") {

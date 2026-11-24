@@ -1,0 +1,12 @@
+<div id="initiative-cards">
+  <div class="grid grid-cols-2 sm:grid-cols-3 gap-4">
+    {% for item in initiatives %}{% include "partials/initiative_card.html" %}{% else %}
+    <div class="col-span-full text-sm text-slate-400 text-center py-6 border border-dashed border-slate-200 rounded-lg">
+      No initiatives yet — try Run classification.
+    </div>
+    {% endfor %}
+  </div>
+  {% if unclassified > 0 %}
+  <p class="text-xs text-slate-400 mt-3">{{ unclassified }} item(s) not yet assigned to an initiative.</p>
+  {% endif %}
+</div>

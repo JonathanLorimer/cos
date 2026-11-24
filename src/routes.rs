@@ -6,7 +6,7 @@ use axum::{Form, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{SharedState, db, mock};
+use crate::{SharedState, classify, db, mock};
 
 fn render<S: Serialize>(state: &SharedState, name: &str, ctx: S) -> Html<String> {
     let tmpl = state.env.get_template(name).expect("template exists");
@@ -22,6 +22,7 @@ fn now() -> String {
 struct AttentionItem {
     text: String,
     kind: String,
+    permalink: Option<String>,
 }
 
 pub fn router() -> Router<SharedState> {
@@ -51,6 +52,12 @@ pub fn router() -> Router<SharedState> {
             patch(resolve_linear_ticket),
         )
         .route("/linear-tickets/{identifier}", delete(delete_linear_ticket))
+        .route(
+            "/initiatives",
+            get(initiatives_page).post(create_initiative),
+        )
+        .route("/initiatives/classify", axum::routing::post(classify_now))
+        .route("/initiatives/{id}", get(initiative_detail).delete(delete_initiative))
         .route("/sources", get(sources_page))
         .route("/mock/slack", get(mock::mock_slack))
         .route("/mock/linear", get(mock::mock_linear))
@@ -78,6 +85,7 @@ async fn dashboard(State(state): State<SharedState>) -> Html<String> {
             attention.push(AttentionItem {
                 text: format!("Review {} ({})", l.repo, l.status),
                 kind: "github".into(),
+                permalink: Some(l.source_permalink.clone()),
             });
         }
     }
@@ -86,6 +94,7 @@ async fn dashboard(State(state): State<SharedState>) -> Html<String> {
             attention.push(AttentionItem {
                 text: format!("{}: {}", m.from_user, m.text),
                 kind: "slack mention".into(),
+                permalink: Some(m.source_permalink.clone()),
             });
         }
     }
@@ -94,6 +103,7 @@ async fn dashboard(State(state): State<SharedState>) -> Html<String> {
             attention.push(AttentionItem {
                 text: format!("{} (due {})", c.text, c.due_date),
                 kind: "commitment".into(),
+                permalink: Some(c.source_permalink.clone()),
             });
         }
     }
@@ -102,6 +112,7 @@ async fn dashboard(State(state): State<SharedState>) -> Html<String> {
             attention.push(AttentionItem {
                 text: format!("{} — {}", t.identifier, t.title),
                 kind: "linear".into(),
+                permalink: None,
             });
         }
     }
@@ -328,6 +339,135 @@ async fn delete_linear_ticket(
 ) -> impl IntoResponse {
     db::delete_linear_ticket(&state.db, &identifier).unwrap();
     StatusCode::OK
+}
+
+// --- initiatives ---
+
+#[derive(Serialize)]
+struct InitiativeSummary {
+    id: i64,
+    name: String,
+    description: String,
+    total_items: usize,
+    open_items: usize,
+}
+
+fn initiative_summaries(state: &SharedState) -> (Vec<InitiativeSummary>, usize) {
+    let initiatives = db::list_initiatives(&state.db).unwrap();
+    let links = db::list_github_links(&state.db).unwrap();
+    let commitments = db::list_commitments(&state.db).unwrap();
+    let mentions = db::list_mentions(&state.db).unwrap();
+    let tickets = db::list_linear_tickets(&state.db).unwrap();
+
+    let summaries = initiatives
+        .into_iter()
+        .map(|i| {
+            let id = Some(i.id);
+            let l: Vec<_> = links.iter().filter(|x| x.initiative_id == id).collect();
+            let c: Vec<_> = commitments.iter().filter(|x| x.initiative_id == id).collect();
+            let m: Vec<_> = mentions.iter().filter(|x| x.initiative_id == id).collect();
+            let t: Vec<_> = tickets.iter().filter(|x| x.initiative_id == id).collect();
+            let open_items = l.iter().filter(|x| x.status != "resolved" && x.status != "merged").count()
+                + c.iter().filter(|x| x.status == "open").count()
+                + m.iter().filter(|x| !x.responded).count()
+                + t.iter().filter(|x| x.state != "Done").count();
+            InitiativeSummary {
+                id: i.id,
+                name: i.name,
+                description: i.description,
+                total_items: l.len() + c.len() + m.len() + t.len(),
+                open_items,
+            }
+        })
+        .collect();
+
+    let unclassified = links.iter().filter(|x| x.initiative_id.is_none()).count()
+        + commitments.iter().filter(|x| x.initiative_id.is_none()).count()
+        + mentions.iter().filter(|x| x.initiative_id.is_none()).count()
+        + tickets.iter().filter(|x| x.initiative_id.is_none()).count();
+
+    (summaries, unclassified)
+}
+
+async fn initiatives_page(State(state): State<SharedState>) -> Html<String> {
+    let (initiatives, unclassified) = initiative_summaries(&state);
+    render(
+        &state,
+        "initiatives.html",
+        json!({ "active": "initiatives", "initiatives": initiatives, "unclassified": unclassified }),
+    )
+}
+
+#[derive(Deserialize)]
+struct NewInitiative {
+    name: String,
+    description: String,
+}
+
+async fn create_initiative(
+    State(state): State<SharedState>,
+    Form(form): Form<NewInitiative>,
+) -> Html<String> {
+    db::create_initiative(&state.db, &form.name, &form.description, &now()).unwrap();
+    let (initiatives, unclassified) = initiative_summaries(&state);
+    render(
+        &state,
+        "partials/initiative_cards.html",
+        json!({ "initiatives": initiatives, "unclassified": unclassified }),
+    )
+}
+
+async fn classify_now(State(state): State<SharedState>) -> Html<String> {
+    classify::run(&state.db, &now()).unwrap();
+    let (initiatives, unclassified) = initiative_summaries(&state);
+    render(
+        &state,
+        "partials/initiative_cards.html",
+        json!({ "initiatives": initiatives, "unclassified": unclassified }),
+    )
+}
+
+async fn delete_initiative(State(state): State<SharedState>, Path(id): Path<i64>) -> impl IntoResponse {
+    db::delete_initiative(&state.db, id).unwrap();
+    StatusCode::OK
+}
+
+async fn initiative_detail(State(state): State<SharedState>, Path(id): Path<i64>) -> Html<String> {
+    let initiative = db::get_initiative(&state.db, id).unwrap();
+    let init_id = Some(id);
+    let github_links: Vec<_> = db::list_github_links(&state.db)
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.initiative_id == init_id)
+        .collect();
+    let commitments: Vec<_> = db::list_commitments(&state.db)
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.initiative_id == init_id)
+        .collect();
+    let mentions: Vec<_> = db::list_mentions(&state.db)
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.initiative_id == init_id)
+        .collect();
+    let linear_tickets: Vec<_> = db::list_linear_tickets(&state.db)
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.initiative_id == init_id)
+        .collect();
+
+    render(
+        &state,
+        "initiative_detail.html",
+        json!({
+            "active": "initiatives",
+            "initiative": initiative,
+            "github_links": github_links,
+            "commitments": commitments,
+            "mentions": mentions,
+            "linear_tickets": linear_tickets,
+        }),
+    )
 }
 
 // --- mock sources ---
