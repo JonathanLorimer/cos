@@ -7,7 +7,15 @@ use serde_json::{Value, json};
 // always-on.
 pub const SONNET: &str = "claude-sonnet-5";
 pub const OPUS: &str = "claude-opus-5";
+pub const HAIKU: &str = "claude-haiku-4-5";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
+
+// `output_config.effort` is an Opus-5/Sonnet-5-tier param — it 400s on older
+// models including Haiku 4.5. Model-gate it here so call sites never have to
+// know which models support it.
+fn supports_effort(model: &str) -> bool {
+    model == OPUS || model == SONNET
+}
 
 pub struct AnthropicClient {
     api_key: String,
@@ -17,9 +25,10 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    // `model`/`effort` are picked per call site: Sonnet 5 at "low" effort
-    // for the frequent per-message pass, Opus 5 at "high" for the
-    // infrequent bulk initiative assessment.
+    // `model`/`effort` are picked per call site: Haiku 4.5 for the
+    // high-volume per-message triage pass, Opus 5 at "high" effort for the
+    // infrequent bulk initiative assessment. `effort` is ignored for models
+    // that don't support it (see supports_effort).
     pub fn from_env(model: &str, effort: &str) -> Option<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").ok()?;
         if api_key.trim().is_empty() {
@@ -48,15 +57,17 @@ impl AnthropicClient {
         tools: Value,
         max_tokens: u32,
     ) -> Result<Vec<(String, Value)>> {
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "max_tokens": max_tokens,
             "system": system,
             "tools": tools,
             "tool_choice": {"type": "auto"},
-            "output_config": {"effort": self.effort},
             "messages": [{"role": "user", "content": user_content}],
         });
+        if supports_effort(&self.model) {
+            body["output_config"] = json!({"effort": self.effort});
+        }
 
         let resp = self
             .http

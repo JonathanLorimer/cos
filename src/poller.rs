@@ -55,7 +55,7 @@ pub async fn run_extraction(db: &Db) -> Result<()> {
         .filter(|n| n.updated_at > since_linear)
         .collect();
 
-    match AnthropicClient::from_env(agent::SONNET, "low") {
+    match AnthropicClient::from_env(agent::HAIKU, "low") {
         Some(client) => {
             agent_extraction::run_messages(db, &client, &new_messages, &now).await?;
         }

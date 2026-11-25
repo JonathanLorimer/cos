@@ -26,10 +26,23 @@ in
       default = null;
       description = ''
         Path to an EnvironmentFile for systemd, e.g. a sops-nix secret
-        containing SLACK_USER_TOKEN / LINEAR_API_KEY / ANTHROPIC_API_KEY.
-        Not required to run the dashboard itself — only the live pollers,
-        once wired up, read these.
+        containing SLACK_USER_TOKEN / LINEAR_API_KEY / GITHUB_TOKEN /
+        ANTHROPIC_API_KEY. Not required to run the dashboard itself — every
+        source degrades to "not configured, no data from here" rather than
+        failing — but without it there's nothing for the pollers to do.
       '';
+    };
+
+    pollIntervalSecs = mkOption {
+      type = types.nullOr types.ints.positive;
+      default = null;
+      description = "Overrides COS_POLL_INTERVAL_SECS (app default: 300s).";
+    };
+
+    bulkThreshold = mkOption {
+      type = types.nullOr types.ints.positive;
+      default = null;
+      description = "Overrides COS_BULK_THRESHOLD (app default: 20 pending items).";
     };
   };
 
@@ -37,11 +50,22 @@ in
     systemd.services.cos = {
       description = "cos chief-of-staff dashboard";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      # network.target only means "networking is configured," not "the
+      # internet is reachable" — this service calls out to four external
+      # APIs on startup, so it needs to wait for an actual route, not just
+      # the subsystem being up.
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
 
       environment = {
         COS_ADDR = "127.0.0.1:${toString cfg.port}";
         COS_DB_PATH = "/var/lib/cos/cos.sqlite3";
+      }
+      // optionalAttrs (cfg.pollIntervalSecs != null) {
+        COS_POLL_INTERVAL_SECS = toString cfg.pollIntervalSecs;
+      }
+      // optionalAttrs (cfg.bulkThreshold != null) {
+        COS_BULK_THRESHOLD = toString cfg.bulkThreshold;
       };
 
       serviceConfig = {

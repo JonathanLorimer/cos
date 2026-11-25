@@ -8,6 +8,16 @@ use crate::db::{self, Db};
 use crate::util::days_ago;
 
 const STANDALONE_WINDOW_DAYS: i64 = 7;
+// Bounds worst-case prompt size so max_tokens stays well under the
+// non-streaming-safe ceiling regardless of real-world backlog size. A prior
+// version computed max_tokens from the full unbounded item count and capped
+// it at 8192 — at real volume (191 pending items) that meant the model's
+// response got cut off before completing a single tool call, silently
+// producing 0 assignments with no error. Chunking fixes the root cause
+// instead of just raising the cap further.
+const PENDING_CHUNK_SIZE: usize = 40;
+const MAX_STANDALONE_CONTEXT: usize = 20;
+const MAX_TOKENS_CEILING: u32 = 16_000;
 
 // Bulk, infrequent, expensive-model pass: looks at every item that hasn't
 // had an initiative decision yet, in a SINGLE call, so it can group related
@@ -232,14 +242,8 @@ pub async fn run(db: &Db, client: &AnthropicClient, now: &str) -> Result<()> {
     }
 
     let since = days_ago(STANDALONE_WINDOW_DAYS);
-    let standalone = gather_recent_standalone(db, &since)?;
-
-    let initiatives = initiatives_context(db)?;
-    let pending_list = pending
-        .iter()
-        .map(|i| format!("- {}: {}", i.item_ref, i.description))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut standalone = gather_recent_standalone(db, &since)?;
+    standalone.truncate(MAX_STANDALONE_CONTEXT);
     let standalone_list = if standalone.is_empty() {
         "(none)".to_string()
     } else {
@@ -250,58 +254,78 @@ pub async fn run(db: &Db, client: &AnthropicClient, now: &str) -> Result<()> {
             .join("\n")
     };
 
-    let system = format!("{SYSTEM}\n\nExisting initiatives:\n{initiatives}");
-    let user_content = format!(
-        "Needs a decision:\n{pending_list}\n\nRecently reviewed, still standalone (reference only):\n{standalone_list}"
-    );
-    let max_tokens = (((pending.len() + standalone.len()) as u32) * 150 + 1024).min(8192);
+    let total_chunks = pending.len().div_ceil(PENDING_CHUNK_SIZE);
+    let mut total_assigned = 0;
+    let mut total_standalone = 0;
+    let mut total_reconsidered = 0;
 
-    let calls = client
-        .call_tools(&system, &user_content, tools(), max_tokens)
-        .await?;
+    // Sequential across chunks (not concurrent): a chunk can create a new
+    // initiative that the NEXT chunk should see and reuse, rather than two
+    // chunks independently inventing near-duplicate initiatives for the same
+    // thing. initiatives_context is re-read each iteration for that reason.
+    for (chunk_idx, chunk) in pending.chunks(PENDING_CHUNK_SIZE).enumerate() {
+        let initiatives = initiatives_context(db)?;
+        let pending_list = chunk
+            .iter()
+            .map(|i| format!("- {}: {}", i.item_ref, i.description))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-    let mut touched: HashSet<String> = HashSet::new();
-    let mut assigned = 0;
-    for (name, input) in calls {
-        if name != "assign_initiative_item" {
-            continue;
+        let system = format!("{SYSTEM}\n\nExisting initiatives:\n{initiatives}");
+        let user_content = format!(
+            "Needs a decision:\n{pending_list}\n\nRecently reviewed, still standalone (reference only):\n{standalone_list}"
+        );
+        let max_tokens = (((chunk.len() + standalone.len()) as u32) * 150 + 1024).min(MAX_TOKENS_CEILING);
+
+        let calls = client
+            .call_tools(&system, &user_content, tools(), max_tokens)
+            .await?;
+
+        let mut touched: HashSet<String> = HashSet::new();
+        for (name, input) in calls {
+            if name != "assign_initiative_item" {
+                continue;
+            }
+            let item_ref = input.get("item_ref").and_then(|v| v.as_str()).unwrap_or_default();
+            if item_ref.is_empty() {
+                continue;
+            }
+            let initiative_name = input
+                .get("initiative_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unsorted");
+            let initiative_description = input
+                .get("initiative_description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let initiative_id =
+                db::get_or_create_initiative(db, initiative_name, initiative_description, now)?;
+            apply_assignment(db, item_ref, initiative_id, now)?;
+            touched.insert(item_ref.to_string());
         }
-        let item_ref = input.get("item_ref").and_then(|v| v.as_str()).unwrap_or_default();
-        if item_ref.is_empty() {
-            continue;
+
+        // Every pending item in this chunk gets a verdict, even if that
+        // verdict is "left standalone" — that's what moves it out of
+        // gather_pending and into (at most) the reconsideration window.
+        for item in chunk {
+            if touched.contains(&item.item_ref) {
+                total_assigned += 1;
+            } else {
+                mark_standalone(db, &item.item_ref, now)?;
+                total_standalone += 1;
+            }
         }
-        let initiative_name = input
-            .get("initiative_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unsorted");
-        let initiative_description = input
-            .get("initiative_description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let initiative_id = db::get_or_create_initiative(db, initiative_name, initiative_description, now)?;
-        apply_assignment(db, item_ref, initiative_id, now)?;
-        touched.insert(item_ref.to_string());
-        assigned += 1;
+        total_reconsidered += standalone.iter().filter(|i| touched.contains(&i.item_ref)).count();
+
+        tracing::debug!(
+            "bulk classify: chunk {}/{total_chunks} done ({} items)",
+            chunk_idx + 1,
+            chunk.len()
+        );
     }
-
-    // Every pending item gets a verdict this cycle, even if that verdict is
-    // "left standalone" — that's what moves it out of gather_pending and
-    // into (at most) the recent-standalone reconsideration window next time.
-    let mut left_standalone = 0;
-    for item in &pending {
-        if !touched.contains(&item.item_ref) {
-            mark_standalone(db, &item.item_ref, now)?;
-            left_standalone += 1;
-        }
-    }
-
-    let reconsidered = standalone
-        .iter()
-        .filter(|i| touched.contains(&i.item_ref))
-        .count();
 
     tracing::info!(
-        "bulk classify: {assigned} assigned ({reconsidered} retroactively, from the standalone pool), {left_standalone} left standalone"
+        "bulk classify: {total_assigned} assigned across {total_chunks} chunk(s) ({total_reconsidered} retroactively, from the standalone pool), {total_standalone} left standalone"
     );
 
     Ok(())

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures::future::join_all;
 use serde_json::json;
 
 use crate::agent::AnthropicClient;
@@ -7,6 +8,12 @@ use crate::slack::Message as SlackMessage;
 use crate::util::repo_from_url;
 
 const MAX_TOKENS: u32 = 1024;
+// Network round-trips are the bottleneck, not local work — run this many
+// triage calls concurrently instead of one message at a time. At real
+// volume (hundreds of messages per first backfill) sequential calls took
+// ~7 minutes; this is the actual fix, a cheaper model alone doesn't address
+// the round-trip count.
+const CONCURRENCY: usize = 10;
 
 // Preliminary categorization only — fast/cheap triage per message. Initiative
 // assignment is deliberately NOT this stage's job: it happens "after the
@@ -73,6 +80,18 @@ fn tools() -> serde_json::Value {
     ])
 }
 
+fn user_content_for(msg: &SlackMessage) -> String {
+    let thread_note = msg
+        .thread_context
+        .as_ref()
+        .map(|c| format!("\n\nOther messages in this thread (for context only — classify the Message above, not these):\n{c}"))
+        .unwrap_or_default();
+    format!(
+        "From: {}\nChannel: {}\nMentions jonathan: {}\njonathan reacted: {}\nMessage: {}{thread_note}",
+        msg.from_user, msg.channel, msg.mentions_me, msg.reacted_by_me, msg.text
+    )
+}
+
 pub async fn run_messages(
     db: &Db,
     client: &AnthropicClient,
@@ -81,20 +100,35 @@ pub async fn run_messages(
 ) -> Result<()> {
     let tools = tools();
 
-    for msg in messages {
-        let thread_note = msg
-            .thread_context
-            .as_ref()
-            .map(|c| format!("\n\nOther messages in this thread (for context only — classify the Message above, not these):\n{c}"))
-            .unwrap_or_default();
-        let user_content = format!(
-            "From: {}\nChannel: {}\nMentions jonathan: {}\njonathan reacted: {}\nMessage: {}{thread_note}",
-            msg.from_user, msg.channel, msg.mentions_me, msg.reacted_by_me, msg.text
-        );
+    // Fetch concurrently in bounded chunks (the slow, network-bound part);
+    // apply DB writes afterward in original order (fast, local, and keeps
+    // upsert/merge semantics deterministic regardless of response arrival
+    // order). One message's API failure is logged and skipped, not fatal.
+    // join_all over chunks instead of a Stream/buffer_unordered combinator —
+    // the latter hits a known rustc HRTB inference failure (fails to prove
+    // `Send` through tokio::spawn several frames up) when the mapped closure
+    // borrows from a function parameter like `messages` here.
+    let indexed: Vec<(usize, &SlackMessage)> = messages.iter().enumerate().collect();
+    let mut results: Vec<(usize, Vec<(String, serde_json::Value)>)> = Vec::with_capacity(messages.len());
+    for chunk in indexed.chunks(CONCURRENCY) {
+        let futs = chunk.iter().map(|&(i, msg)| {
+            let tools = tools.clone();
+            let user_content = user_content_for(msg);
+            async move {
+                match client.call_tools(SYSTEM, &user_content, tools, MAX_TOKENS).await {
+                    Ok(calls) => (i, calls),
+                    Err(e) => {
+                        tracing::warn!("agent_extraction: triage call failed for message {i}: {e:#}");
+                        (i, Vec::new())
+                    }
+                }
+            }
+        });
+        results.extend(join_all(futs).await);
+    }
 
-        let calls = client
-            .call_tools(SYSTEM, &user_content, tools.clone(), MAX_TOKENS)
-            .await?;
+    for (i, calls) in results {
+        let msg = &messages[i];
         for (name, input) in calls {
             match name.as_str() {
                 "log_github_link" => {

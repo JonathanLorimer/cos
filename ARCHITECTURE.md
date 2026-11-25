@@ -184,24 +184,46 @@ is set (`agent::AnthropicClient::is_configured`):
   (initiative assignment), real `POST /v1/messages` tool-use calls (raw HTTP
   via `reqwest`; there's no official Anthropic Rust SDK) — but at two
   different model tiers for two different jobs:
-  - `agent_extraction`: **Sonnet 5**, `effort: "low"`, one call per Slack
-    message. Decides PR relationship (authored / reviewing / mentioned),
-    whether it's a commitment, whether it needs a response. Does **not**
-    decide initiative — that's deferred entirely to the bulk pass.
-  - `agent_bulk_classify`: **Opus 5**, `effort: "high"`, one call for the
-    entire batch of pending items across all four tables. Every pending item
-    is listed in the prompt; Opus responds with one `assign_initiative_item`
-    tool call per item **it decides warrants one** — not every item gets a
-    group. A small, isolated ask with nothing else related to it is left
-    standalone on purpose; the system prompt explicitly says not to invent an
-    initiative just to give every item a home. Seeing the whole batch at once
-    is what lets it consolidate items that only make sense together (e.g. an
-    infra PR, two unrelated-looking Slack mentions, and a Linear ticket all
-    turned out to be the same "Release Cut Readiness" effort) in a way a
-    one-item-at-a-time pass structurally can't — a prior per-item-Sonnet
-    version of this classifier split that same set into two initiatives; the
-    bulk Opus pass merged them correctly. Skipped entirely (no API call) when
-    nothing is pending.
+  - `agent_extraction`: **Haiku 4.5** (moved off Sonnet 5 after a real-scale
+    test — see below), one call per Slack message, up to `CONCURRENCY` (10)
+    in flight at once rather than strictly sequential. Decides PR
+    relationship (authored / reviewing / mentioned), whether it's a
+    commitment, whether it needs a response. Does **not** decide initiative —
+    that's deferred entirely to the bulk pass. `output_config.effort` is
+    model-gated in `agent.rs` (`supports_effort`) since it's an Opus-5/
+    Sonnet-5-only param that 400s on Haiku 4.5 — Haiku calls omit it entirely.
+  - `agent_bulk_classify`: **Opus 5**, `effort: "high"`, processed in
+    sequential chunks of up to 40 pending items (`PENDING_CHUNK_SIZE`), not
+    one call for the whole batch. Every pending item in a chunk is listed in
+    the prompt; Opus responds with one `assign_initiative_item` tool call per
+    item **it decides warrants one** — not every item gets a group. A small,
+    isolated ask with nothing else related to it is left standalone on
+    purpose; the system prompt explicitly says not to invent an initiative
+    just to give every item a home. Seeing a batch at once is what lets it
+    consolidate items that only make sense together (e.g. an infra PR, two
+    unrelated-looking Slack mentions, and a Linear ticket all turned out to
+    be the same "Release Cut Readiness" effort) in a way a one-item-at-a-time
+    pass structurally can't — a prior per-item-Sonnet version of this
+    classifier split that same set into two initiatives; the bulk Opus pass
+    merged them correctly. Skipped entirely (no API call) when nothing is
+    pending. Chunks run sequentially, not concurrently, and
+    `initiatives_context` is re-read before each chunk — so a chunk can reuse
+    an initiative a prior chunk just created instead of inventing a
+    duplicate.
+
+**Found at real scale, fixed, worth knowing about**: the first live test
+against ~300 real Slack messages took ~7 minutes to extract (one Sonnet call
+at a time, sequential) and the bulk pass assigned **0 of 191** pending items.
+The second bug wasn't a model-quality problem — `max_tokens` was computed as
+`items * 150 + 1024` and then capped at a flat 8192 regardless of actual
+need; at 191 items the real requirement was ~30K tokens, so Opus's response
+(competing with its own adaptive-thinking token spend) got cut off before
+completing a single tool call, with no error surfaced. Fixed by chunking
+(bounds worst-case prompt size instead of raising the cap further) and by
+parallelizing + switching extraction to Haiku (addresses the sequential
+round-trip count, which a model swap alone wouldn't have). Re-tested against
+the same real workspace afterward: extraction dropped to ~75s for 295
+messages, and bulk classify assigned 108 of 152 items across 4 chunks.
 
 **Pending vs. standalone** — `initiative_id` alone can't distinguish "never
 looked at this" from "looked, and it's genuinely fine on its own," so there's
@@ -457,10 +479,16 @@ flowchart LR
   changes — matters once the poller/extraction code pulls in more crates.
   Exposed as `packages.default` / `packages.cos`.
 - **NixOS module** (`nixosModules.default`): options for `enable`, `package`
-  (defaults to this flake's `packages.cos`), `port`, `dataDir` (SQLite file
-  location, via `StateDirectory`), and `environmentFile` (passed straight to
-  systemd's `EnvironmentFile=`, pointed at a `sops-nix` secret path in the
-  consuming NixOS config). The service runs with `DynamicUser = true`.
+  (defaults to this flake's `packages.cos`), `port`, `environmentFile`
+  (passed straight to systemd's `EnvironmentFile=`, pointed at a `sops-nix`
+  secret path in the consuming NixOS config — not required to start, every
+  source just degrades to "not configured" without it), and optional
+  `pollIntervalSecs`/`bulkThreshold` overrides. The service runs with
+  `DynamicUser = true` and `StateDirectory = "cos"` (so `/var/lib/cos` is
+  created automatically, no manual setup), and `after`/`wants`
+  `network-online.target` rather than `network.target` — this service calls
+  four external APIs on startup, so it needs an actual route, not just the
+  networking subsystem being configured.
 - **Headless browser testing**: `chromium --headless=new --screenshot=out.png
   --window-size=1280,800 http://localhost:$PORT` from the devShell is enough
   to visually verify dashboard/fragment rendering — no webdriver server, no
