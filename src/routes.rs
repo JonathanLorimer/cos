@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::util::now;
-use crate::{SharedState, db, mock, poller};
+use crate::{SharedState, db, poller};
 
 fn render<S: Serialize>(state: &SharedState, name: &str, ctx: S) -> Html<String> {
     let tmpl = state.env.get_template(name).expect("template exists");
@@ -56,9 +56,6 @@ pub fn router() -> Router<SharedState> {
         .route("/initiatives/classify", axum::routing::post(classify_now))
         .route("/initiatives/{id}", get(initiative_detail).delete(delete_initiative))
         .route("/sources", get(sources_page))
-        .route("/mock/slack", get(mock::mock_slack))
-        .route("/mock/linear", get(mock::mock_linear))
-        .route("/mock/github", get(mock::mock_github))
 }
 
 async fn dashboard(State(state): State<SharedState>) -> Html<String> {
@@ -475,8 +472,17 @@ async fn initiative_detail(State(state): State<SharedState>, Path(id): Path<i64>
     )
 }
 
-// --- mock sources ---
+// --- sources ---
 
 async fn sources_page(State(state): State<SharedState>) -> Html<String> {
-    render(&state, "sources.html", json!({ "active": "sources" }))
+    render(
+        &state,
+        "sources.html",
+        json!({
+            "active": "sources",
+            "slack_configured": crate::slack::SlackClient::from_env().is_some(),
+            "github_configured": crate::github::GithubClient::from_env().is_some(),
+            "linear_configured": crate::linear::LinearClient::from_env().is_some(),
+        }),
+    )
 }

@@ -4,10 +4,12 @@ mod agent_extraction;
 mod classify;
 mod db;
 mod extraction;
-mod mock;
+mod github;
+mod linear;
 mod models;
 mod poller;
 mod routes;
+mod slack;
 mod util;
 
 use std::sync::Arc;
@@ -39,8 +41,15 @@ async fn main() -> anyhow::Result<()> {
         agent = agent::AnthropicClient::is_configured(),
         "running startup extraction + bulk classification"
     );
-    poller::run_extraction(&db).await?;
-    poller::run_bulk_classification(&db).await?;
+    // Logged, not `?`: a live-service hiccup (GitHub token pending approval,
+    // Slack down, a transient network error) shouldn't prevent the server
+    // from coming up and serving whatever data already exists.
+    if let Err(e) = poller::run_extraction(&db).await {
+        tracing::error!("startup extraction failed: {e:#}");
+    }
+    if let Err(e) = poller::run_bulk_classification(&db).await {
+        tracing::error!("startup bulk classification failed: {e:#}");
+    }
 
     let poll_interval_secs: u64 = std::env::var("COS_POLL_INTERVAL_SECS")
         .ok()

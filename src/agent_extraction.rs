@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::agent::AnthropicClient;
 use crate::db::{self, Db};
-use crate::mock::SlackMessageFixture;
+use crate::slack::Message as SlackMessage;
 use crate::util::repo_from_url;
 
 const MAX_TOKENS: u32 = 1024;
@@ -74,7 +74,7 @@ fn tools() -> serde_json::Value {
 pub async fn run_messages(
     db: &Db,
     client: &AnthropicClient,
-    messages: &[SlackMessageFixture],
+    messages: &[SlackMessage],
     now: &str,
 ) -> Result<()> {
     let tools = tools();

@@ -1,27 +1,45 @@
 {% extends "base.html" %}
 {% block title %}Sources{% endblock %}
 {% block content %}
-<h2 class="text-lg font-semibold mb-2">Mock Sources</h2>
+<h2 class="text-lg font-semibold mb-2">Sources</h2>
 <p class="text-sm text-slate-500 mb-4">
-  Stand-ins for the Slack, Linear, and GitHub APIs described in
-  <code class="text-xs bg-slate-100 px-1 py-0.5 rounded">ARCHITECTURE.md</code>.
-  The seed job on startup reads these same fixtures through
-  <code class="text-xs bg-slate-100 px-1 py-0.5 rounded">extraction::run</code>
-  and writes the rows you see on the other pages. Swapping a mock for a live
-  API only touches that one module.
+  All three sources are live integrations now — no mock fixtures left. A
+  source showing "not configured" or erroring mid-poll degrades to "no new
+  data this cycle," not a crash (see <code class="text-xs bg-slate-100 px-1 py-0.5 rounded">src/poller.rs</code>).
 </p>
 <div class="grid gap-4">
-  <a href="/mock/slack" target="_blank" class="block rounded-lg border border-slate-200 bg-white p-4 hover:border-slate-400">
-    <div class="font-medium text-sm">GET /mock/slack</div>
-    <div class="text-xs text-slate-500">search.messages / reactions.list fixture</div>
-  </a>
-  <a href="/mock/linear" target="_blank" class="block rounded-lg border border-slate-200 bg-white p-4 hover:border-slate-400">
-    <div class="font-medium text-sm">GET /mock/linear</div>
-    <div class="text-xs text-slate-500">viewer.notifications fixture</div>
-  </a>
-  <a href="/mock/github" target="_blank" class="block rounded-lg border border-slate-200 bg-white p-4 hover:border-slate-400">
-    <div class="font-medium text-sm">GET /mock/github</div>
-    <div class="text-xs text-slate-500">PR status-sync fixture</div>
-  </a>
+  <div class="rounded-lg border border-slate-200 bg-white p-4">
+    <div class="flex items-center justify-between">
+      <div class="font-medium text-sm">Slack</div>
+      {% if slack_configured %}
+      <span class="text-xs rounded px-2 py-0.5 bg-green-100 text-green-700">configured</span>
+      {% else %}
+      <span class="text-xs rounded px-2 py-0.5 bg-slate-100 text-slate-500">not configured</span>
+      {% endif %}
+    </div>
+    <div class="text-xs text-slate-500 mt-1">src/slack.rs — search.messages, reactions.list. Requires SLACK_USER_TOKEN.</div>
+  </div>
+  <div class="rounded-lg border border-slate-200 bg-white p-4">
+    <div class="flex items-center justify-between">
+      <div class="font-medium text-sm">GitHub</div>
+      {% if github_configured %}
+      <span class="text-xs rounded px-2 py-0.5 bg-green-100 text-green-700">configured</span>
+      {% else %}
+      <span class="text-xs rounded px-2 py-0.5 bg-slate-100 text-slate-500">not configured</span>
+      {% endif %}
+    </div>
+    <div class="text-xs text-slate-500 mt-1">src/github.rs — PR status sync for tracked links. Requires GITHUB_TOKEN.</div>
+  </div>
+  <div class="rounded-lg border border-slate-200 bg-white p-4">
+    <div class="flex items-center justify-between">
+      <div class="font-medium text-sm">Linear</div>
+      {% if linear_configured %}
+      <span class="text-xs rounded px-2 py-0.5 bg-green-100 text-green-700">configured</span>
+      {% else %}
+      <span class="text-xs rounded px-2 py-0.5 bg-slate-100 text-slate-500">not configured</span>
+      {% endif %}
+    </div>
+    <div class="text-xs text-slate-500 mt-1">src/linear.rs — assignedIssues, createdIssues, notifications. Requires LINEAR_API_KEY.</div>
+  </div>
 </div>
 {% endblock %}

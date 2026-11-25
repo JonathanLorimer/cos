@@ -242,7 +242,7 @@ fires once there's actually enough to batch:
 sequenceDiagram
     participant Loop as poller::run_cycle (every COS_POLL_INTERVAL_SECS)
     participant DB as SQLite (sync_cursors + initiative_reviewed_at)
-    participant Src as mock sources
+    participant Src as Slack / GitHub / Linear
 
     Loop->>DB: get_cursor("slack"), get_cursor("linear")
     Loop->>Src: fetch all, filter to ts/updated_at > cursor
@@ -286,26 +286,31 @@ no parsing, and no local-timezone-offset bugs from mixing `Local::now()`
 output with `Z`-suffixed fixture data (an earlier version of this code had
 exactly that bug before the cursor comparisons existed to expose it).
 
-What's still mock: the sources themselves (`mock::slack_messages()` etc. are
-static fixtures, not live API calls) — the polling *mechanism* (cursor,
-interval loop, extraction/classification dispatch) is real and will work
-unchanged once `src/mock.rs`'s fetch functions are swapped for live
-Slack/Linear API calls.
+All three sources are real now — `slack.rs`, `github.rs`, `linear.rs`.
+`src/mock.rs` has been deleted; nothing in the pipeline is a fixture anymore.
+The polling mechanism itself (cursor, interval loop, extraction/
+classification dispatch) never knew or cared which sources were live vs.
+mocked — that was the point of keeping `insert_linear_tickets` (and the
+Slack/GitHub equivalents) as separate, source-agnostic functions from the
+start, so swapping each one in was an isolated, low-risk change.
 
 ## Environment variables
 
-`ANTHROPIC_API_KEY` is live — set it and extraction/classification run
-through real Claude tool-use calls instead of the rule-based fallback. The
-other three aren't read yet; the app still runs entirely on mock Slack/Linear
-/GitHub fixtures. Documented now so the NixOS module's `environmentFile`
-(sops-nix) option has a known target once each poller goes live:
+All four are live — each is actually read, by `agent.rs`, `github.rs`,
+`slack.rs`, and `linear.rs` respectively.
 
-| Variable | Used by |
-|---|---|
-| `SLACK_USER_TOKEN` | live Slack poller (`search.messages`, `reactions.list`) |
-| `LINEAR_API_KEY` | live Linear poller |
-| `GITHUB_TOKEN` | live GitHub status-sync job |
-| `ANTHROPIC_API_KEY` | real extraction + initiative classification (replaces `extraction.rs` / `classify.rs` heuristics) |
+| Variable | Used by | Status as of writing |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | real extraction + initiative classification | live, working |
+| `GITHUB_TOKEN` | `github.rs` PR status sync | configured, but repo-scoped access is pending org approval — public repos work (verified against a real `rust-lang/rust` PR), `mercury-eng`-style org repos 403/404 until then |
+| `SLACK_USER_TOKEN` | `slack.rs` message/mention/reaction fetch | not set — extraction silently finds 0 new Slack messages every cycle until this exists. Also the one client that's **unverified against a live token** (none exists in this dev environment) — the mention-search query in particular (`<@USER_ID>` as literal query text, no documented `mentions:` modifier exists) should get a real smoke test the moment a token lands. |
+| `LINEAR_API_KEY` | `linear.rs` assignedIssues/createdIssues/notifications | live, verified against the real Mercury workspace (86 tickets ingested, 48 bulk-classified into initiatives, 38 correctly left standalone on first run) |
+
+Any of these being absent or erroring is a normal, expected, ongoing state,
+not a crash: `poller::run_extraction` degrades per-source (empty result +
+a log line) rather than failing the whole cycle, and the startup calls in
+`main.rs` log instead of propagating `?`, so the HTTP server always comes up
+regardless of which live services are currently reachable.
 
 ## Extraction tool calls
 

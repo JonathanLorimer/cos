@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use crate::db::{self, Db};
-use crate::mock::{LinearNotificationFixture, SlackMessageFixture};
+use crate::linear::Ticket as LinearTicket;
+use crate::slack::Message as SlackMessage;
 use crate::util::{find_github_url, repo_from_url};
 
 // Rule-based stand-in for the Claude tool-use extraction pass described in
@@ -21,7 +22,7 @@ fn due_date_from_text(text: &str) -> String {
 
 const ME: &str = "jonathan";
 
-pub fn run_messages(db: &Db, messages: &[SlackMessageFixture], now: &str) -> Result<()> {
+pub fn run_messages(db: &Db, messages: &[SlackMessage], now: &str) -> Result<()> {
     for msg in messages {
         if let Some(url) = find_github_url(&msg.text) {
             let repo = repo_from_url(&url);
@@ -59,7 +60,7 @@ pub fn run_messages(db: &Db, messages: &[SlackMessageFixture], now: &str) -> Res
 // Mechanical — Linear's own notification type already tells us the
 // relationship, no classification needed. Shared by both the heuristic and
 // agent-based extraction paths.
-pub fn insert_linear_tickets(db: &Db, tickets: &[LinearNotificationFixture], now: &str) -> Result<()> {
+pub fn insert_linear_tickets(db: &Db, tickets: &[LinearTicket], now: &str) -> Result<()> {
     for n in tickets {
         db::log_linear_ticket(
             db,
