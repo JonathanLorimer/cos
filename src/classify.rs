@@ -27,7 +27,7 @@ pub fn run(db: &Db, now: &str) -> Result<()> {
                 id
             }
         };
-        db::assign_github_link(db, link.id, Some(initiative_id))?;
+        db::assign_github_link(db, link.id, Some(initiative_id), now)?;
     }
 
     for ticket in db::list_linear_tickets(db)? {
@@ -38,7 +38,7 @@ pub fn run(db: &Db, now: &str) -> Result<()> {
             continue;
         };
         if let Some(&id) = repo_to_initiative.get(&repo_from_url(url)) {
-            db::assign_linear_ticket(db, &ticket.identifier, Some(id))?;
+            db::assign_linear_ticket(db, &ticket.identifier, Some(id), now)?;
         }
     }
 
@@ -50,7 +50,7 @@ pub fn run(db: &Db, now: &str) -> Result<()> {
             continue;
         };
         if let Some(&id) = repo_to_initiative.get(&repo_from_url(&url)) {
-            db::assign_mention(db, mention.id, Some(id))?;
+            db::assign_mention(db, mention.id, Some(id), now)?;
         }
     }
 
@@ -62,7 +62,7 @@ pub fn run(db: &Db, now: &str) -> Result<()> {
             continue;
         };
         if let Some(&id) = repo_to_initiative.get(&repo_from_url(&url)) {
-            db::assign_commitment(db, commitment.id, Some(id))?;
+            db::assign_commitment(db, commitment.id, Some(id), now)?;
         }
     }
 

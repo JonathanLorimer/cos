@@ -71,23 +71,29 @@ pub async fn run_bulk_classification(db: &Db) -> Result<()> {
     Ok(())
 }
 
-pub fn spawn_extraction_loop(db: Db, interval: Duration) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(interval).await;
-            if let Err(e) = run_extraction(&db).await {
-                tracing::error!("extraction cycle failed: {e:#}");
-            }
-        }
-    });
+// One scheduled cycle: always extract, then only pay for the expensive bulk
+// pass once pending items reach a critical mass — avoids running Opus on a
+// timer when there's nothing worth batching yet.
+pub async fn run_cycle(db: &Db, bulk_threshold: usize) -> Result<()> {
+    run_extraction(db).await?;
+
+    let pending = db::count_pending(db)?;
+    if pending >= bulk_threshold {
+        tracing::info!("{pending} item(s) pending (>= threshold {bulk_threshold}), running bulk classification");
+        run_bulk_classification(db).await?;
+    } else {
+        tracing::debug!("{pending} item(s) pending (< threshold {bulk_threshold}), skipping bulk classification");
+    }
+
+    Ok(())
 }
 
-pub fn spawn_bulk_classification_loop(db: Db, interval: Duration) {
+pub fn spawn_cycle_loop(db: Db, interval: Duration, bulk_threshold: usize) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            if let Err(e) = run_bulk_classification(&db).await {
-                tracing::error!("bulk classification cycle failed: {e:#}");
+            if let Err(e) = run_cycle(&db, bulk_threshold).await {
+                tracing::error!("poll cycle failed: {e:#}");
             }
         }
     });

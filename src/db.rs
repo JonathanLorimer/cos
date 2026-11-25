@@ -69,6 +69,20 @@ fn migrations() -> Migrations<'static> {
         initiative_id INTEGER REFERENCES initiatives(id)
     );
     ",
+    ),
+    // NULL = never evaluated by bulk classification (must get a decision).
+    // Non-NULL + initiative_id NULL = evaluated, deliberately left standalone
+    // (a one-off, too small to warrant a whole initiative). Lets the bulk
+    // classifier distinguish "haven't looked at this yet" from "looked, and
+    // it's fine on its own" — and resurface the latter for a short window in
+    // case a later item retroactively makes the connection.
+    M::up(
+        "
+    ALTER TABLE github_links ADD COLUMN initiative_reviewed_at TEXT;
+    ALTER TABLE commitments ADD COLUMN initiative_reviewed_at TEXT;
+    ALTER TABLE mentions ADD COLUMN initiative_reviewed_at TEXT;
+    ALTER TABLE linear_tickets ADD COLUMN initiative_reviewed_at TEXT;
+    ",
     )])
 }
 
@@ -101,6 +115,22 @@ pub fn set_cursor(db: &Db, source: &str, at: &str) -> Result<()> {
         params![source, at],
     )?;
     Ok(())
+}
+
+// Cheap gate for whether the bulk classifier is worth running this cycle —
+// four small COUNTs, no row data pulled.
+pub fn count_pending(db: &Db) -> Result<usize> {
+    let conn = db.lock().unwrap();
+    let mut total = 0usize;
+    for table in ["github_links", "commitments", "mentions", "linear_tickets"] {
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE initiative_reviewed_at IS NULL"),
+            [],
+            |r| r.get(0),
+        )?;
+        total += count as usize;
+    }
+    Ok(total)
 }
 
 // --- tool-call layer: these are the write primitives an extraction pass
@@ -249,6 +279,20 @@ pub fn log_linear_ticket(
             last_synced = excluded.last_synced",
         params![identifier, title, state, relationship, linked_github_url, now],
     )?;
+
+    // Ticket closed is a strong, structural signal — linked_github_url is a
+    // real FK, not a text guess — so propagate it to the PR it tracks.
+    // Idempotent and order-independent: sync_github_status treats `resolved`
+    // as sticky, so it doesn't matter which runs first in a given cycle.
+    if state == "Done" {
+        if let Some(url) = linked_github_url {
+            conn.execute(
+                "UPDATE github_links SET status = 'resolved' WHERE url = ?1 AND status != 'resolved'",
+                params![url],
+            )?;
+        }
+    }
+
     Ok(())
 }
 
@@ -257,7 +301,7 @@ pub fn log_linear_ticket(
 pub fn list_github_links(db: &Db) -> Result<Vec<GithubLink>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, url, repo, relationship, status, context, source_permalink, first_seen, last_synced, initiative_id
+        "SELECT id, url, repo, relationship, status, context, source_permalink, first_seen, last_synced, initiative_id, initiative_reviewed_at
          FROM github_links ORDER BY last_synced DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -272,6 +316,7 @@ pub fn list_github_links(db: &Db) -> Result<Vec<GithubLink>> {
             first_seen: r.get(7)?,
             last_synced: r.get(8)?,
             initiative_id: r.get(9)?,
+            initiative_reviewed_at: r.get(10)?,
         })
     })?;
     Ok(rows.filter_map(Result::ok).collect())
@@ -280,7 +325,7 @@ pub fn list_github_links(db: &Db) -> Result<Vec<GithubLink>> {
 pub fn get_github_link(db: &Db, id: i64) -> Result<Option<GithubLink>> {
     let conn = db.lock().unwrap();
     conn.query_row(
-        "SELECT id, url, repo, relationship, status, context, source_permalink, first_seen, last_synced, initiative_id
+        "SELECT id, url, repo, relationship, status, context, source_permalink, first_seen, last_synced, initiative_id, initiative_reviewed_at
          FROM github_links WHERE id = ?1",
         params![id],
         |r| {
@@ -295,6 +340,7 @@ pub fn get_github_link(db: &Db, id: i64) -> Result<Option<GithubLink>> {
                 first_seen: r.get(7)?,
                 last_synced: r.get(8)?,
                 initiative_id: r.get(9)?,
+                initiative_reviewed_at: r.get(10)?,
             })
         },
     )
@@ -306,7 +352,7 @@ pub fn get_github_link(db: &Db, id: i64) -> Result<Option<GithubLink>> {
 pub fn list_commitments(db: &Db) -> Result<Vec<Commitment>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, text, due_date, status, source_permalink, created_at, initiative_id
+        "SELECT id, text, due_date, status, source_permalink, created_at, initiative_id, initiative_reviewed_at
          FROM commitments ORDER BY due_date ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -318,6 +364,7 @@ pub fn list_commitments(db: &Db) -> Result<Vec<Commitment>> {
             source_permalink: r.get(4)?,
             created_at: r.get(5)?,
             initiative_id: r.get(6)?,
+            initiative_reviewed_at: r.get(7)?,
         })
     })?;
     Ok(rows.filter_map(Result::ok).collect())
@@ -326,7 +373,7 @@ pub fn list_commitments(db: &Db) -> Result<Vec<Commitment>> {
 pub fn get_commitment(db: &Db, id: i64) -> Result<Option<Commitment>> {
     let conn = db.lock().unwrap();
     conn.query_row(
-        "SELECT id, text, due_date, status, source_permalink, created_at, initiative_id
+        "SELECT id, text, due_date, status, source_permalink, created_at, initiative_id, initiative_reviewed_at
          FROM commitments WHERE id = ?1",
         params![id],
         |r| {
@@ -338,6 +385,7 @@ pub fn get_commitment(db: &Db, id: i64) -> Result<Option<Commitment>> {
                 source_permalink: r.get(4)?,
                 created_at: r.get(5)?,
                 initiative_id: r.get(6)?,
+                initiative_reviewed_at: r.get(7)?,
             })
         },
     )
@@ -349,7 +397,7 @@ pub fn get_commitment(db: &Db, id: i64) -> Result<Option<Commitment>> {
 pub fn list_mentions(db: &Db) -> Result<Vec<Mention>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, source_permalink, from_user, text, needs_response, responded, created_at, initiative_id
+        "SELECT id, source_permalink, from_user, text, needs_response, responded, created_at, initiative_id, initiative_reviewed_at
          FROM mentions ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -362,6 +410,7 @@ pub fn list_mentions(db: &Db) -> Result<Vec<Mention>> {
             responded: r.get::<_, i64>(5)? != 0,
             created_at: r.get(6)?,
             initiative_id: r.get(7)?,
+            initiative_reviewed_at: r.get(8)?,
         })
     })?;
     Ok(rows.filter_map(Result::ok).collect())
@@ -370,7 +419,7 @@ pub fn list_mentions(db: &Db) -> Result<Vec<Mention>> {
 pub fn get_mention(db: &Db, id: i64) -> Result<Option<Mention>> {
     let conn = db.lock().unwrap();
     conn.query_row(
-        "SELECT id, source_permalink, from_user, text, needs_response, responded, created_at, initiative_id
+        "SELECT id, source_permalink, from_user, text, needs_response, responded, created_at, initiative_id, initiative_reviewed_at
          FROM mentions WHERE id = ?1",
         params![id],
         |r| {
@@ -383,6 +432,7 @@ pub fn get_mention(db: &Db, id: i64) -> Result<Option<Mention>> {
                 responded: r.get::<_, i64>(5)? != 0,
                 created_at: r.get(6)?,
                 initiative_id: r.get(7)?,
+                initiative_reviewed_at: r.get(8)?,
             })
         },
     )
@@ -394,7 +444,7 @@ pub fn get_mention(db: &Db, id: i64) -> Result<Option<Mention>> {
 pub fn list_linear_tickets(db: &Db) -> Result<Vec<LinearTicket>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT identifier, title, state, relationship, linked_github_url, last_synced, initiative_id
+        "SELECT identifier, title, state, relationship, linked_github_url, last_synced, initiative_id, initiative_reviewed_at
          FROM linear_tickets ORDER BY last_synced DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -406,6 +456,7 @@ pub fn list_linear_tickets(db: &Db) -> Result<Vec<LinearTicket>> {
             linked_github_url: r.get(4)?,
             last_synced: r.get(5)?,
             initiative_id: r.get(6)?,
+            initiative_reviewed_at: r.get(7)?,
         })
     })?;
     Ok(rows.filter_map(Result::ok).collect())
@@ -414,7 +465,7 @@ pub fn list_linear_tickets(db: &Db) -> Result<Vec<LinearTicket>> {
 pub fn get_linear_ticket(db: &Db, identifier: &str) -> Result<Option<LinearTicket>> {
     let conn = db.lock().unwrap();
     conn.query_row(
-        "SELECT identifier, title, state, relationship, linked_github_url, last_synced, initiative_id
+        "SELECT identifier, title, state, relationship, linked_github_url, last_synced, initiative_id, initiative_reviewed_at
          FROM linear_tickets WHERE identifier = ?1",
         params![identifier],
         |r| {
@@ -426,6 +477,7 @@ pub fn get_linear_ticket(db: &Db, identifier: &str) -> Result<Option<LinearTicke
                 linked_github_url: r.get(4)?,
                 last_synced: r.get(5)?,
                 initiative_id: r.get(6)?,
+                initiative_reviewed_at: r.get(7)?,
             })
         },
     )
@@ -502,8 +554,12 @@ pub fn get_or_create_initiative(db: &Db, name: &str, description: &str, now: &st
 pub fn delete_initiative(db: &Db, id: i64) -> Result<()> {
     let conn = db.lock().unwrap();
     for table in ["github_links", "commitments", "mentions", "linear_tickets"] {
+        // Reset initiative_reviewed_at too: these items need a fresh
+        // decision, not to silently look like "reviewed, left standalone."
         conn.execute(
-            &format!("UPDATE {table} SET initiative_id = NULL WHERE initiative_id = ?1"),
+            &format!(
+                "UPDATE {table} SET initiative_id = NULL, initiative_reviewed_at = NULL WHERE initiative_id = ?1"
+            ),
             params![id],
         )?;
     }
@@ -511,48 +567,62 @@ pub fn delete_initiative(db: &Db, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn assign_github_link(db: &Db, id: i64, initiative_id: Option<i64>) -> Result<()> {
+// `initiative_id: None` is a legitimate, deliberate outcome here — it means
+// "reviewed, and decided this doesn't need an initiative," not "skipped."
+// Stamping initiative_reviewed_at either way is what lets the bulk
+// classifier tell "never looked at" apart from "looked, left standalone."
+pub fn assign_github_link(db: &Db, id: i64, initiative_id: Option<i64>, now: &str) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "UPDATE github_links SET initiative_id = ?1 WHERE id = ?2",
-        params![initiative_id, id],
+        "UPDATE github_links SET initiative_id = ?1, initiative_reviewed_at = ?2 WHERE id = ?3",
+        params![initiative_id, now, id],
     )?;
     Ok(())
 }
 
-pub fn assign_commitment(db: &Db, id: i64, initiative_id: Option<i64>) -> Result<()> {
+pub fn assign_commitment(db: &Db, id: i64, initiative_id: Option<i64>, now: &str) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "UPDATE commitments SET initiative_id = ?1 WHERE id = ?2",
-        params![initiative_id, id],
+        "UPDATE commitments SET initiative_id = ?1, initiative_reviewed_at = ?2 WHERE id = ?3",
+        params![initiative_id, now, id],
     )?;
     Ok(())
 }
 
-pub fn assign_mention(db: &Db, id: i64, initiative_id: Option<i64>) -> Result<()> {
+pub fn assign_mention(db: &Db, id: i64, initiative_id: Option<i64>, now: &str) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "UPDATE mentions SET initiative_id = ?1 WHERE id = ?2",
-        params![initiative_id, id],
+        "UPDATE mentions SET initiative_id = ?1, initiative_reviewed_at = ?2 WHERE id = ?3",
+        params![initiative_id, now, id],
     )?;
     Ok(())
 }
 
-pub fn assign_linear_ticket(db: &Db, identifier: &str, initiative_id: Option<i64>) -> Result<()> {
+pub fn assign_linear_ticket(
+    db: &Db,
+    identifier: &str,
+    initiative_id: Option<i64>,
+    now: &str,
+) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "UPDATE linear_tickets SET initiative_id = ?1 WHERE identifier = ?2",
-        params![initiative_id, identifier],
+        "UPDATE linear_tickets SET initiative_id = ?1, initiative_reviewed_at = ?2 WHERE identifier = ?3",
+        params![initiative_id, now, identifier],
     )?;
     Ok(())
 }
 
 // --- updates / deletes (the U and D of CRUD) ---
 
+// `resolved` is cos's own terminal marker (set by the manual Resolve button
+// or the Linear-ticket-closed cascade below), not a GitHub-native PR state —
+// it must stick. Without the guard, the very next sync cycle would overwrite
+// it with whatever the live PR state fixture says and silently undo a
+// Resolve click.
 pub fn sync_github_status(db: &Db, url: &str, status: &str, now: &str) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "UPDATE github_links SET status = ?1, last_synced = ?2 WHERE url = ?3",
+        "UPDATE github_links SET status = ?1, last_synced = ?2 WHERE url = ?3 AND status != 'resolved'",
         params![status, now, url],
     )?;
     Ok(())

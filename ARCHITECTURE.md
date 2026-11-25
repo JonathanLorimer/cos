@@ -123,6 +123,30 @@ many-to-many tag table — simplest thing that answers "what's open under this
 initiative," and cheap to widen into a join table later if an item ever
 genuinely needs to belong to more than one.
 
+**State propagation.** `linear_tickets.linked_github_url` is the one
+structural (non-text-guessed) relationship in the schema, so it's the one
+place state changes cascade: when `log_linear_ticket` sees a ticket land on
+`Done` with a `linked_github_url` set, it resolves the matching `github_links`
+row (`db.rs`). `resolved` is treated as sticky everywhere else — both the
+manual Resolve button and this cascade set it, and `sync_github_status` now
+guards `WHERE status != 'resolved'` so a later "live" GitHub state sync can't
+silently revert it (this was a latent bug independent of the cascade — found
+while wiring the cascade in, since without the guard the two would have
+fought each other within the same extraction cycle). Commitments and mentions
+have no equivalent structural FK to a specific PR/ticket, so no cascade
+reaches them — the ticket→PR link is the only one that's a real foreign key
+rather than a text match.
+
+**Linear scope.** Every Linear notification still gets ingested unconditionally
+(filtering at ingest time would be premature — you need to classify an item
+before you can know whether it relates to anything). But a ticket that's been
+reviewed and is still standalone (no initiative) has no Slack/PR activity to
+cross-reference — that's just Linear's own task tracking, which Linear
+already shows you — so `/linear-tickets` collapses those into a closed
+`<details>` section instead of duplicating Linear's UI. Pending
+(not-yet-reviewed) tickets are unaffected: "no initiative yet" isn't the same
+as "judged unrelated."
+
 ## Initiatives
 
 The cross-cutting grouping a PR, a Slack ask, and a Linear ticket can all
@@ -136,9 +160,11 @@ Polling below for why.
 flowchart LR
     Msg["new Slack message\n(since cursor)"] --> AE["agent_extraction::run_messages\n(Sonnet 5, per message)"]
     AE -->|log_github_link / log_commitment / flag_mention\nNO initiative assigned| DB[(SQLite)]
-    DB --> Unassigned["every unassigned item,\nall 4 tables, gathered at once"]
-    Unassigned --> ABC["agent_bulk_classify::run\n(Opus 5, ONE call for the whole batch)"]
-    ABC -->|assign_initiative_item x N\nin a single response| DB
+    DB --> Pending["pending items\n(initiative_reviewed_at IS NULL)"]
+    DB --> Standalone["recent standalone items\n(reviewed, no initiative, last 7 days)\noptional reconsideration context"]
+    Pending --> ABC["agent_bulk_classify::run\n(Opus 5, ONE call for the whole batch)"]
+    Standalone --> ABC
+    ABC -->|assign_initiative_item x N,\nonly for items worth grouping| DB
     DB --> List["GET /initiatives\n(cards: name, open/total)"]
     DB --> Detail["GET /initiatives/:id\n(all 4 item types, filtered)"]
 ```
@@ -148,7 +174,12 @@ is set (`agent::AnthropicClient::is_configured`):
 
 - **No key**: `extraction.rs` (regex/keyword rules) + `classify.rs` (group by
   shared GitHub repo, one item at a time). Deterministic, free, no network
-  call — what runs by default and in CI.
+  call — what runs by default and in CI. Doesn't make "is this worth an
+  initiative" judgment calls — it either finds a repo match or leaves the
+  item alone forever (not standalone-pending-review, since the heuristic
+  path doesn't participate in that state machine at all; the agent path
+  picks it up correctly the moment a key is configured, since unreviewed
+  just means `initiative_reviewed_at IS NULL`).
 - **Key present**: `agent_extraction.rs` (triage) + `agent_bulk_classify.rs`
   (initiative assignment), real `POST /v1/messages` tool-use calls (raw HTTP
   via `reqwest`; there's no official Anthropic Rust SDK) — but at two
@@ -158,44 +189,84 @@ is set (`agent::AnthropicClient::is_configured`):
     whether it's a commitment, whether it needs a response. Does **not**
     decide initiative — that's deferred entirely to the bulk pass.
   - `agent_bulk_classify`: **Opus 5**, `effort: "high"`, one call for the
-    *entire* batch of currently-unassigned items across all four tables.
-    Every item is listed in a single prompt; Opus responds with one
-    `assign_initiative_item` tool call per item in the same turn. Seeing
-    everything at once is the point: it can consolidate items that only make
-    sense together (e.g. an infra PR, two unrelated-looking Slack mentions,
-    and a Linear ticket all turned out to be the same "Release Cut
-    Readiness" effort) in a way a one-item-at-a-time pass structurally
-    can't — a prior per-item-Sonnet version of this classifier split that
-    same set into two initiatives; the bulk Opus pass merged them correctly.
-    Skipped entirely (no API call) when nothing is unassigned.
+    entire batch of pending items across all four tables. Every pending item
+    is listed in the prompt; Opus responds with one `assign_initiative_item`
+    tool call per item **it decides warrants one** — not every item gets a
+    group. A small, isolated ask with nothing else related to it is left
+    standalone on purpose; the system prompt explicitly says not to invent an
+    initiative just to give every item a home. Seeing the whole batch at once
+    is what lets it consolidate items that only make sense together (e.g. an
+    infra PR, two unrelated-looking Slack mentions, and a Linear ticket all
+    turned out to be the same "Release Cut Readiness" effort) in a way a
+    one-item-at-a-time pass structurally can't — a prior per-item-Sonnet
+    version of this classifier split that same set into two initiatives; the
+    bulk Opus pass merged them correctly. Skipped entirely (no API call) when
+    nothing is pending.
+
+**Pending vs. standalone** — `initiative_id` alone can't distinguish "never
+looked at this" from "looked, and it's genuinely fine on its own," so there's
+a second column, `initiative_reviewed_at`, set by `assign_*` every time a
+decision is made regardless of outcome:
+
+| `initiative_id` | `initiative_reviewed_at` | Meaning |
+|---|---|---|
+| NULL | NULL | Pending — must get a decision next bulk cycle |
+| NULL | set | Reviewed, deliberately left standalone |
+| set | set | Reviewed, assigned |
+
+Every bulk cycle, pending items are mandatory — each either gets assigned or
+gets `initiative_reviewed_at` stamped with no `initiative_id` (a real
+decision, not a skip). Items already reviewed and still standalone, but seen
+within the last 7 days, are re-offered as a second, clearly-labeled "optional
+reconsideration" list in the same prompt — not because they need another
+look on a timer, but so that a *new* item arriving later can retroactively
+pull one of them into a freshly-formed initiative (e.g. a one-off mention
+from last week turns out to be the first sign of something that only became
+a pattern today). The system prompt is explicit that this list is
+reference-only and shouldn't be reorganized without a reason from the current
+batch. Deleting an initiative resets `initiative_reviewed_at` to NULL for its
+former items too — they go back to pending, not into limbo as
+already-reviewed orphans.
 
 Both paths write through the same `db::log_*` / `db::assign_*` primitives, so
 the UI and schema don't know or care which one ran.
 
 ## Polling
 
-Two independent `tokio::spawn` loops, different cadences, matching the
-cost/frequency split above:
+One `tokio::spawn` loop (`poller::spawn_cycle_loop`, `COS_POLL_INTERVAL_SECS`,
+default 300s) drives both stages every tick — extraction always runs;
+classification is gated behind a cheap count so the expensive Opus pass only
+fires once there's actually enough to batch:
 
 ```mermaid
 sequenceDiagram
-    participant Fast as extraction loop (COS_POLL_INTERVAL_SECS, default 300s)
-    participant Slow as bulk classification loop (COS_BULK_INTERVAL_SECS, default 1800s)
-    participant DB as SQLite (sync_cursors + initiative_id)
+    participant Loop as poller::run_cycle (every COS_POLL_INTERVAL_SECS)
+    participant DB as SQLite (sync_cursors + initiative_reviewed_at)
     participant Src as mock sources
 
-    Fast->>DB: get_cursor("slack"), get_cursor("linear")
-    Fast->>Src: fetch all, filter to ts/updated_at > cursor
-    Fast->>DB: write new items (no initiative_id), advance cursors
-    Slow->>DB: gather every item with initiative_id IS NULL, all 4 tables
-    Slow->>DB: one bulk call -> assign_initiative_item per item
+    Loop->>DB: get_cursor("slack"), get_cursor("linear")
+    Loop->>Src: fetch all, filter to ts/updated_at > cursor
+    Loop->>DB: write new items (no initiative_id), advance cursors
+    Loop->>DB: count_pending() — 4 cheap COUNT(*) queries, no rows pulled
+    alt pending >= COS_BULK_THRESHOLD (default 20)
+        Loop->>DB: gather pending + recent standalone items, all 4 tables
+        Loop->>DB: one bulk call -> assign_initiative_item for items worth grouping, mark the rest reviewed
+    else below threshold
+        Loop->>Loop: skip — nothing worth an Opus call yet
+    end
 ```
 
-`poller::run_extraction` and `poller::run_bulk_classification` are each a
-single code path reused by three triggers: the startup calls in `main.rs`
-(run once immediately, so the UI isn't empty on first boot), their own
-interval loop, and — for classification only — the "Run classification"
-button (a manual, on-demand bulk pass).
+`poller::run_extraction` and `poller::run_bulk_classification` stay separate,
+independently-callable functions — `run_cycle` just sequences them with the
+threshold check in between. Three triggers: the startup calls in `main.rs`
+(both run unconditionally once, so the UI isn't empty on first boot — the
+threshold gate only applies to the recurring loop, not startup), the single
+interval loop (`run_cycle`), and — for classification only, bypassing the
+threshold entirely — the "Run classification" button, a manual on-demand bulk
+pass. `COS_BULK_THRESHOLD` is a count of *pending* items
+(`initiative_reviewed_at IS NULL`), not total items — already-reviewed
+standalone items don't count toward it, so the gate doesn't fire repeatedly
+for a backlog that's already been decided on.
 
 Each source (`slack`, `linear`) has a row in `sync_cursors` holding
 `last_synced_at`. A missing row defaults to the epoch, so a brand-new

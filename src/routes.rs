@@ -286,11 +286,19 @@ struct NewLinearTicket {
 }
 
 async fn linear_tickets_page(State(state): State<SharedState>) -> Html<String> {
-    let items = db::list_linear_tickets(&state.db).unwrap();
+    let all = db::list_linear_tickets(&state.db).unwrap();
+    // Reviewed-and-standalone tickets have no related Slack/PR activity to
+    // cross-reference — that's just Linear's own task tracking, which Linear
+    // already shows you. Collapse those out of the default view rather than
+    // duplicating Linear's UI; pending (not-yet-reviewed) tickets still show
+    // normally since "no initiative yet" isn't the same as "judged unrelated."
+    let (standalone, items): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .partition(|t| t.initiative_id.is_none() && t.initiative_reviewed_at.is_some());
     render(
         &state,
         "linear_tickets.html",
-        json!({ "active": "linear-tickets", "items": items }),
+        json!({ "active": "linear-tickets", "items": items, "standalone": standalone }),
     )
 }
 

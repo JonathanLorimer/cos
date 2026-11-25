@@ -47,5 +47,18 @@
   </table>
 </div>
 
+{% if standalone %}
+<details class="mt-4 rounded-lg border border-slate-200 bg-white">
+  <summary class="cursor-pointer px-4 py-2 text-sm font-medium text-slate-600">
+    {{ standalone | length }} standalone ticket(s) not shown — no related Slack/PR activity, check Linear directly
+  </summary>
+  <table class="w-full">
+    <tbody>
+      {% for item in standalone %}{% include "partials/linear_ticket_row.html" %}{% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endif %}
+
 <script src="/static/islands/filter.js"></script>
 {% endblock %}

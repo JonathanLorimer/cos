@@ -5,6 +5,12 @@ pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+// Same format as now(), so it's directly comparable to stored timestamps as
+// a plain string — used for "items from the last N days" windows.
+pub fn days_ago(n: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::days(n)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 pub fn find_github_url(text: &str) -> Option<String> {
     let idx = text.find("https://github.com/")?;
     let rest = &text[idx..];

@@ -42,24 +42,21 @@ async fn main() -> anyhow::Result<()> {
     poller::run_extraction(&db).await?;
     poller::run_bulk_classification(&db).await?;
 
-    let extraction_interval_secs: u64 = std::env::var("COS_POLL_INTERVAL_SECS")
+    let poll_interval_secs: u64 = std::env::var("COS_POLL_INTERVAL_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(300);
-    let bulk_interval_secs: u64 = std::env::var("COS_BULK_INTERVAL_SECS")
+    let bulk_threshold: usize = std::env::var("COS_BULK_THRESHOLD")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1800);
-    poller::spawn_extraction_loop(
+        .unwrap_or(20);
+    poller::spawn_cycle_loop(
         db.clone(),
-        std::time::Duration::from_secs(extraction_interval_secs),
-    );
-    poller::spawn_bulk_classification_loop(
-        db.clone(),
-        std::time::Duration::from_secs(bulk_interval_secs),
+        std::time::Duration::from_secs(poll_interval_secs),
+        bulk_threshold,
     );
     tracing::info!(
-        "extracting every {extraction_interval_secs}s, bulk-classifying every {bulk_interval_secs}s"
+        "polling every {poll_interval_secs}s, bulk-classifying once pending items reach {bulk_threshold}"
     );
 
     let templates_dir = std::env::var("COS_TEMPLATES_DIR").unwrap_or_else(|_| "templates".into());
