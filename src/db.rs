@@ -2,67 +2,79 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
+use rusqlite_migration::{M, Migrations};
 
 use crate::models::{Commitment, GithubLink, Initiative, LinearTicket, Mention};
 
 pub type Db = Arc<Mutex<Connection>>;
 
-pub fn open(path: &str) -> Result<Db> {
-    let conn = Connection::open(path)?;
-    conn.execute_batch(
+// Tracked via SQLite's `user_version` (rusqlite_migration's doing, not a
+// hand-rolled migrations table). Append a new M::up(...) for every future
+// schema change instead of editing an existing one — editing an applied
+// migration is a no-op on any database that already ran it, which is exactly
+// the bug this replaces (CREATE TABLE IF NOT EXISTS silently doing nothing
+// on existing DBs when a column was added — hit that for real earlier in
+// this project's life and had to manually delete the dev DB).
+fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![M::up(
         "
-        CREATE TABLE IF NOT EXISTS initiatives (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            description TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS github_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT NOT NULL UNIQUE,
-            repo TEXT NOT NULL,
-            relationship TEXT NOT NULL,
-            status TEXT NOT NULL,
-            context TEXT NOT NULL,
-            source_permalink TEXT NOT NULL,
-            first_seen TEXT NOT NULL,
-            last_synced TEXT NOT NULL,
-            initiative_id INTEGER REFERENCES initiatives(id)
-        );
-        CREATE TABLE IF NOT EXISTS commitments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            due_date TEXT NOT NULL,
-            status TEXT NOT NULL,
-            source_permalink TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            initiative_id INTEGER REFERENCES initiatives(id)
-        );
-        CREATE TABLE IF NOT EXISTS mentions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_permalink TEXT NOT NULL UNIQUE,
-            from_user TEXT NOT NULL,
-            text TEXT NOT NULL,
-            needs_response INTEGER NOT NULL,
-            responded INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            initiative_id INTEGER REFERENCES initiatives(id)
-        );
-        CREATE TABLE IF NOT EXISTS sync_cursors (
-            source TEXT PRIMARY KEY,
-            last_synced_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS linear_tickets (
-            identifier TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            state TEXT NOT NULL,
-            relationship TEXT NOT NULL,
-            linked_github_url TEXT,
-            last_synced TEXT NOT NULL,
-            initiative_id INTEGER REFERENCES initiatives(id)
-        );
-        ",
-    )?;
+    CREATE TABLE initiatives (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE github_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT NOT NULL UNIQUE,
+        repo TEXT NOT NULL,
+        relationship TEXT NOT NULL,
+        status TEXT NOT NULL,
+        context TEXT NOT NULL,
+        source_permalink TEXT NOT NULL,
+        first_seen TEXT NOT NULL,
+        last_synced TEXT NOT NULL,
+        initiative_id INTEGER REFERENCES initiatives(id)
+    );
+    CREATE TABLE commitments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT NOT NULL,
+        due_date TEXT NOT NULL,
+        status TEXT NOT NULL,
+        source_permalink TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        initiative_id INTEGER REFERENCES initiatives(id)
+    );
+    CREATE TABLE mentions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_permalink TEXT NOT NULL UNIQUE,
+        from_user TEXT NOT NULL,
+        text TEXT NOT NULL,
+        needs_response INTEGER NOT NULL,
+        responded INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        initiative_id INTEGER REFERENCES initiatives(id)
+    );
+    CREATE TABLE sync_cursors (
+        source TEXT PRIMARY KEY,
+        last_synced_at TEXT NOT NULL
+    );
+    CREATE TABLE linear_tickets (
+        identifier TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        state TEXT NOT NULL,
+        relationship TEXT NOT NULL,
+        linked_github_url TEXT,
+        last_synced TEXT NOT NULL,
+        initiative_id INTEGER REFERENCES initiatives(id)
+    );
+    ",
+    )])
+}
+
+pub fn open(path: &str) -> Result<Db> {
+    let mut conn = Connection::open(path)?;
+    migrations().to_latest(&mut conn)?;
     Ok(Arc::new(Mutex::new(conn)))
 }
 

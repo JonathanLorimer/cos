@@ -349,6 +349,17 @@ cos/
   in the deployed NixOS service, where `sops-nix` supplies an
   `EnvironmentFile` to the systemd unit. No secret material lives in the repo
   or the dev shell.
+- **Schema: `rusqlite_migration`**, not inline `CREATE TABLE IF NOT EXISTS`.
+  The original version ran a big `execute_batch` of `IF NOT EXISTS` DDL on
+  every startup — fine for a brand-new file, but silently a no-op on an
+  existing one, so adding a column (e.g. `initiative_id`) to an
+  already-created table did nothing and broke on the next query. Hit that for
+  real mid-project and had to manually delete the dev DB. Now schema changes
+  are an ordered `Vec<M>` tracked via SQLite's `user_version` pragma (no
+  hand-rolled migrations table) — `db::open` calls `.to_latest(&mut conn)`,
+  which applies whatever's pending and is a true no-op otherwise. Future
+  schema changes are a new `M::up(...)` appended to the list, never an edit
+  to an existing one.
 
 ## Nix
 
