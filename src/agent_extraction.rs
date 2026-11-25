@@ -18,7 +18,9 @@ You are the triage stage of a chief-of-staff tool for Jonathan. You are given on
 time and decide what, if anything, is worth tracking from it. Jonathan's Slack handle is 'jonathan'. \
 Call zero or more of the available tools based on the message content — most messages warrant zero or \
 one tool call, don't force one. Do not worry about which initiative this belongs to; that's decided in \
-a separate pass later.
+a separate pass later. Some messages include surrounding thread context — use it only to understand what \
+the target message means (e.g. what a bare 'I'll get to it Friday' is actually about); every tool call \
+should still describe the target message's own content, not the thread as a whole.
 
 For log_github_link: relationship is 'authored' if jonathan is the message's author and the PR is his \
 own work; 'reviewing' if someone is asking jonathan to look at/review/approve it, or jonathan is \
@@ -80,8 +82,13 @@ pub async fn run_messages(
     let tools = tools();
 
     for msg in messages {
+        let thread_note = msg
+            .thread_context
+            .as_ref()
+            .map(|c| format!("\n\nOther messages in this thread (for context only — classify the Message above, not these):\n{c}"))
+            .unwrap_or_default();
         let user_content = format!(
-            "From: {}\nChannel: {}\nMentions jonathan: {}\njonathan reacted: {}\nMessage: {}",
+            "From: {}\nChannel: {}\nMentions jonathan: {}\njonathan reacted: {}\nMessage: {}{thread_note}",
             msg.from_user, msg.channel, msg.mentions_me, msg.reacted_by_me, msg.text
         );
 
